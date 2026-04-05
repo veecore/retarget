@@ -1,20 +1,35 @@
 //! Windows tests for dynamic libraries loaded after hook install.
 
 use retarget::{
-    InterceptionEvent, InterceptionMode, InterceptionState, hook, install_registered_hooks,
-    interception_snapshot,
+    hook, install_registered_hooks,
+    intercept::{Event, Mode},
 };
+use std::sync::{Mutex, OnceLock};
 
 #[path = "../windows_dynamic_support.rs"]
 mod support;
 
 /// Enables interception tracking for this integration test binary.
-#[hook::observer(default = EveryHit)]
-fn observe_interception(_: InterceptionEvent) {}
+#[hook::observer(default = Mode::EveryHit)]
+fn observe_interception(event: Event) {
+    events()
+        .lock()
+        .expect("event buffer should stay available")
+        .push(event);
+}
+
+fn events() -> &'static Mutex<Vec<Event>> {
+    static EVENTS: OnceLock<Mutex<Vec<Event>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn take_events() -> Vec<Event> {
+    std::mem::take(&mut *events().lock().expect("event buffer should stay available"))
+}
 
 /// Intercepts one function exported from the helper target DLL.
-#[hook::observe(EveryHit)]
-#[hook::c(function = ("hook_test_target.dll", "hook_test_add_one"))]
+#[hook::observe(Mode::EveryHit)]
+#[hook::c(("hook_test_target.dll", "hook_test_add_one"))]
 unsafe extern "system" fn hook_test_add_one(value: i32) -> i32 {
     forward!() + 100
 }
@@ -22,6 +37,8 @@ unsafe extern "system" fn hook_test_add_one(value: i32) -> i32 {
 /// Verifies that the hook still intercepts when the caller DLL loads after install.
 #[test]
 fn windows_intercepts_dynamic_target_loaded_after_install() {
+    take_events();
+
     let _target = support::open_test_target_dll();
 
     install_registered_hooks().expect("expected Windows dynamic hook to install");
@@ -31,21 +48,15 @@ fn windows_intercepts_dynamic_target_loaded_after_install() {
     let observed = unsafe { call_add_one(2) };
     assert_eq!(observed, 103);
 
-    let snapshot = interception_snapshot();
-    assert_hook_observed(&snapshot, "hook_test_add_one");
+    let events = take_events();
+    assert_hook_observed(&events, "hook_test_add_one");
 }
 
-fn assert_hook_observed(snapshot: &[InterceptionEvent], suffix: &str) {
-    let event = snapshot
+fn assert_hook_observed(events: &[Event], suffix: &str) {
+    let event = events
         .iter()
         .find(|event| event.hook_id.ends_with(suffix))
-        .unwrap_or_else(|| panic!("expected interception snapshot entry for {suffix}"));
+        .unwrap_or_else(|| panic!("expected interception event for {suffix}"));
 
-    assert_eq!(event.mode, InterceptionMode::EveryHit);
-    match &event.state {
-        InterceptionState::Observed { count, .. } => assert!(*count >= 1),
-        InterceptionState::Unobserved => {
-            panic!("expected observed interception state for {suffix}")
-        }
-    }
+    assert_eq!(event.mode, Mode::EveryHit);
 }

@@ -77,13 +77,13 @@ The root should feel small:
 ```rust
 use retarget::{
     hook,
+    intercept,
     images,
     symbols,
     install_registered_hooks,
-    interception_snapshot,
-    InterceptionEvent,
-    InterceptionMode,
 };
+
+use retarget::intercept::{Event, Mode};
 ```
 
 Support modules should also exist at the root:
@@ -110,10 +110,7 @@ The backend patch engines stay internal.
 surface.
 
 ```rust
-#[hook::c(
-    symbol = symbols::named("GetCurrentProcessId"),
-    image = images::kernel32(),
-)]
+#[hook::c(("kernel32.dll", "GetCurrentProcessId"))]
 unsafe extern "system" fn get_current_process_id() -> u32 {
     forward!() + 1
 }
@@ -121,31 +118,27 @@ unsafe extern "system" fn get_current_process_id() -> u32 {
 
 The macro should accept:
 
-- `symbol`
-- optional `image`
+- no argument when the Rust function name already matches
+- one positional target expression
 - optional `name`
 - optional `fallback`
 - optional `optional`
 
-`symbol` should be typed internally too.
+The positional target should still be typed internally.
 
 That means the public path should be something like:
 
-- `symbol = symbols::named("GetCurrentProcessId")`
+- `symbols::named("GetCurrentProcessId")`
 
 But convenience should still matter.
 
 So plain values like:
 
 - `"GetCurrentProcessId"`
+- `("kernel32.dll", "GetCurrentProcessId")`
 
 should be accepted through an `IntoSymbol` conversion into one opaque
-`Symbol`.
-
-`image` should follow the same model:
-
-- `images::kernel32()` is the polished path
-- `"kernel32.dll"` can still convert into `Image`
+function target.
 
 `name` should only be a display override for probe/install/observation output.
 If omitted, the crate should derive it from the symbol or, failing that, from
@@ -485,14 +478,14 @@ Interception should stay separate from hook shape.
 The good UX is still:
 
 ```rust
-#[hook::observer(default = FirstHit)]
-fn on_interception(event: InterceptionEvent) {}
+#[hook::observer(default = Mode::FirstHit)]
+fn on_interception(event: Event) {}
 ```
 
 with rare per-hook overrides:
 
 ```rust
-#[hook::observe(EveryHit)]
+#[hook::observe(Mode::EveryHit)]
 #[hook::com_method(Present)]
 unsafe extern "system" fn present(...) -> HRESULT {
     forward!()
@@ -502,8 +495,8 @@ unsafe extern "system" fn present(...) -> HRESULT {
 or:
 
 ```rust
-#[hook::observe(EveryHit)]
-#[hook::c(symbol = "GetCursorPos")]
+#[hook::observe(Mode::EveryHit)]
+#[hook::c("GetCursorPos")]
 unsafe extern "system" fn get_cursor_pos(...) -> BOOL {
     forward!()
 }

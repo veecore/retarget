@@ -1,5 +1,5 @@
-error: missing required `function` argument
- --> tests/ui/common/function_missing_function.rs:4:22
+error: positional hook target must come before named arguments
+ --> tests/ui/common/function_missing_function.rs:3:35
   |
-4 | unsafe extern "C" fn missing_target(value: i32) -> i32 {
-  |                      ^^^^^^^^^^^^^^
+3 | #[hook::function(optional = true, "puts")]
+  |                                   ^^^^^^

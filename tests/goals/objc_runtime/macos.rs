@@ -2,14 +2,30 @@
 
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use retarget::{
-    InterceptionEvent, InterceptionMode, InterceptionState, ObjcMethod, hook,
-    install_registered_hooks, interception_snapshot, into_objc_class, into_objc_selector,
+    ObjcMethod, hook, install_registered_hooks,
+    intercept::{Event, Mode},
+    into_objc_class, into_objc_selector,
 };
 use std::ffi::c_void;
+use std::sync::{Mutex, OnceLock};
 
 /// Enables interception tracking for this integration test binary.
-#[hook::observer(default = EveryHit)]
-fn observe_interception(_: InterceptionEvent) {}
+#[hook::observer(default = Mode::EveryHit)]
+fn observe_interception(event: Event) {
+    events()
+        .lock()
+        .expect("event buffer should stay available")
+        .push(event);
+}
+
+fn events() -> &'static Mutex<Vec<Event>> {
+    static EVENTS: OnceLock<Mutex<Vec<Event>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn take_events() -> Vec<Event> {
+    std::mem::take(&mut *events().lock().expect("event buffer should stay available"))
+}
 
 /// Groups one Objective-C hook set into one Rust impl block.
 struct NSObjectHooks;
@@ -43,6 +59,8 @@ fn resolves_public_objective_c_targets() {
 /// Installs one real Objective-C swizzle and verifies interception through the public macros.
 #[test]
 fn installs_objective_c_hook_and_intercepts_runtime_calls() {
+    take_events();
+
     let object = NSObject::new();
     let baseline = object.hash();
 
@@ -51,21 +69,15 @@ fn installs_objective_c_hook_and_intercepts_runtime_calls() {
     let observed = object.hash();
     assert_eq!(observed, baseline.wrapping_add(100));
 
-    let snapshot = interception_snapshot();
-    assert_hook_observed(&snapshot, "NSObjectHooks::hash");
+    let events = take_events();
+    assert_hook_observed(&events, "NSObjectHooks::hash");
 }
 
-fn assert_hook_observed(snapshot: &[InterceptionEvent], suffix: &str) {
-    let event = snapshot
+fn assert_hook_observed(events: &[Event], suffix: &str) {
+    let event = events
         .iter()
         .find(|event| event.hook_id.ends_with(suffix))
-        .unwrap_or_else(|| panic!("expected interception snapshot entry for {suffix}"));
+        .unwrap_or_else(|| panic!("expected interception event for {suffix}"));
 
-    assert_eq!(event.mode, InterceptionMode::EveryHit);
-    match &event.state {
-        InterceptionState::Observed { count, .. } => assert!(*count >= 1),
-        InterceptionState::Unobserved => {
-            panic!("expected observed interception state for {suffix}")
-        }
-    }
+    assert_eq!(event.mode, Mode::EveryHit);
 }

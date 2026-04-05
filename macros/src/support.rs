@@ -2,7 +2,7 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, format_ident, quote};
-use syn::{Expr, ExprLit, Ident, Lit, LitStr, Result, Type};
+use syn::{Expr, ExprLit, Ident, Lit, LitStr, Path, Result, Type};
 
 /// One normalized description of the generated items for a function-like hook.
 pub(crate) struct FunctionLikeHook {
@@ -16,6 +16,8 @@ pub(crate) struct FunctionLikeHook {
     pub(crate) original_ident: Ident,
     /// The generated storage cell for the original implementation.
     pub(crate) original_lock_ident: Ident,
+    /// The generated first-hit gate for interception callbacks.
+    pub(crate) intercept_once_ident: Ident,
     /// The generated optional accessor function for callers.
     pub(crate) accessor_ident: Ident,
     /// The generated installer function name.
@@ -34,6 +36,8 @@ pub(crate) struct FunctionLikeHook {
     pub(crate) fallback: Expr,
     /// The generated installer body.
     pub(crate) install_body: TokenStream2,
+    /// Extra generated items emitted beside the shared hook scaffolding.
+    pub(crate) extra_items: TokenStream2,
 }
 
 /// Emits the shared generated items used by plain functions and impl methods.
@@ -44,6 +48,7 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
         fallback_ident,
         original_ident,
         original_lock_ident,
+        intercept_once_ident,
         accessor_ident,
         install_ident,
         hook_def_ident,
@@ -53,6 +58,7 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
         abi,
         fallback,
         install_body,
+        extra_items,
     } = hook;
     let fallback_params = arg_tys.iter().map(|ty| quote! { _: #ty });
 
@@ -71,6 +77,9 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
         static #original_lock_ident: std::sync::OnceLock<#fn_ty_ident> =
             std::sync::OnceLock::new();
 
+        #[allow(non_upper_case_globals)]
+        static #intercept_once_ident: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
         #[allow(dead_code, non_snake_case)]
         fn #accessor_ident() -> Option<#fn_ty_ident> {
             #original_lock_ident.get().copied()
@@ -87,6 +96,8 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
             #install_body
         }
 
+        #extra_items
+
         #[allow(non_upper_case_globals)]
         #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::HOOKS)]
         static #hook_def_ident: ::retarget::__macro_support::HookDef =
@@ -101,9 +112,18 @@ pub(crate) fn require_arg<T>(value: Option<T>, span: &impl ToTokens, message: &s
     value.ok_or_else(|| syn::Error::new_spanned(span, message))
 }
 
-/// Maps one interception-mode identifier to its runtime enum value.
-pub(crate) fn interception_mode_tokens(mode: &Ident, ident: &Ident) -> Result<TokenStream2> {
-    match mode.to_string().as_str() {
+/// Maps one interception-mode path to its runtime enum value.
+pub(crate) fn interception_mode_tokens(mode: &Path, ident: &Ident) -> Result<TokenStream2> {
+    let Some(mode_ident) = mode.segments.last().map(|segment| &segment.ident) else {
+        return Err(syn::Error::new_spanned(
+            mode,
+            format!(
+                "unsupported interception mode for `{ident}`; expected `Off`, `FirstHit`, or `EveryHit`"
+            ),
+        ));
+    };
+
+    match mode_ident.to_string().as_str() {
         "Off" => Ok(quote!(::retarget::InterceptionMode::Off)),
         "FirstHit" => Ok(quote!(::retarget::InterceptionMode::FirstHit)),
         "EveryHit" => Ok(quote!(::retarget::InterceptionMode::EveryHit)),
@@ -114,6 +134,80 @@ pub(crate) fn interception_mode_tokens(mode: &Ident, ident: &Ident) -> Result<To
             ),
         )),
     }
+}
+
+/// Emits one optional per-hook interception override item.
+pub(crate) fn emit_interception_override(
+    def_ident: &Ident,
+    hook_id: &Expr,
+    mode: Option<&Path>,
+    ident: &Ident,
+) -> Result<TokenStream2> {
+    let Some(mode) = mode else {
+        return Ok(TokenStream2::new());
+    };
+    let mode = interception_mode_tokens(mode, ident)?;
+    Ok(quote! {
+        #[cfg(feature = "registry")]
+        #[allow(non_upper_case_globals)]
+        #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::INTERCEPTION_OVERRIDES)]
+        static #def_ident: ::retarget::__macro_support::InterceptionOverrideDef =
+            ::retarget::__macro_support::InterceptionOverrideDef {
+                hook_id: #hook_id,
+                mode: #mode,
+            };
+    })
+}
+
+/// Emits one optional per-hook typed-signal registration item.
+pub(crate) fn emit_interception_signal(
+    def_ident: &Ident,
+    hook_id: &Expr,
+    value: Option<&Expr>,
+) -> Result<TokenStream2> {
+    let Some(value) = value else {
+        return Ok(TokenStream2::new());
+    };
+    let type_id_ident = format_ident!("__blinder_interception_signal_type_{}", def_ident);
+    let type_name_ident = format_ident!("__blinder_interception_signal_name_{}", def_ident);
+    let assert_ident = format_ident!("__BLINDER_INTERCEPTION_SIGNAL_ASSERT_{}", def_ident);
+
+    Ok(quote! {
+        #[cfg(feature = "registry")]
+        #[allow(non_snake_case)]
+        fn #type_id_ident() -> ::std::any::TypeId {
+            fn __retarget_signal_type_id<T: 'static>(_: fn() -> T) -> ::std::any::TypeId {
+                ::std::any::TypeId::of::<T>()
+            }
+            __retarget_signal_type_id(|| #value)
+        }
+
+        #[cfg(feature = "registry")]
+        #[allow(non_snake_case)]
+        fn #type_name_ident() -> &'static str {
+            fn __retarget_signal_type_name<T: 'static>(_: fn() -> T) -> &'static str {
+                ::std::any::type_name::<T>()
+            }
+            __retarget_signal_type_name(|| #value)
+        }
+
+        #[cfg(feature = "registry")]
+        #[allow(non_upper_case_globals)]
+        const #assert_ident: fn() = || {
+            fn __retarget_assert_signal<T: Clone + 'static>(_: fn() -> T) {}
+            __retarget_assert_signal(|| #value);
+        };
+
+        #[cfg(feature = "registry")]
+        #[allow(non_upper_case_globals)]
+        #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::INTERCEPTION_SIGNALS)]
+        static #def_ident: ::retarget::__macro_support::InterceptionSignalDef =
+            ::retarget::__macro_support::InterceptionSignalDef {
+                hook_id: #hook_id,
+                type_id: #type_id_ident,
+                type_name: #type_name_ident,
+            };
+    })
 }
 
 /// Builds the stable hook identifier used by free-function hooks.
@@ -158,6 +252,12 @@ pub(crate) fn derive_function_hook_name_expr(
     }
 
     Ok(syn::parse_quote!(stringify!(#span)))
+}
+
+/// Uses the Rust function name as the default exported-function target.
+pub(crate) fn default_function_target_expr(ident: &Ident) -> Expr {
+    let symbol = LitStr::new(&ident.to_string(), ident.span());
+    syn::parse_quote!(#symbol)
 }
 
 /// Derives a human-readable Objective-C hook name from class and selector expressions.

@@ -1,5 +1,5 @@
-error: unsupported interception mode for `invalid_mode`; expected `Off`, `FirstHit`, or `EveryHit`
- --> tests/ui/common/observe_invalid_mode.rs:3:17
+error: unsupported interception mode; expected `Off`, `FirstHit`, or `EveryHit`
+ --> tests/ui/common/observe_invalid_mode.rs:3:40
   |
-3 | #[hook::observe(Sometimes)]
-  |                 ^^^^^^^^^
+3 | #[hook::observe(value = 1usize, mode = Sometimes)]
+  |                                        ^^^^^^^^^

@@ -129,9 +129,12 @@ pub use objc::{
     into_objc_method, into_objc_selector,
 };
 #[cfg(feature = "registry")]
+pub use registry::intercept;
+#[cfg(feature = "registry")]
+pub use registry::intercept::{InterceptionEvent, InterceptionHit, InterceptionMode, Signal};
+#[cfg(feature = "registry")]
 pub use registry::{
-    HookFailure, HookSpec, InterceptionEvent, InterceptionMode, InterceptionState,
-    finish_named_install, install_registered_hooks, interception_snapshot, probe_hook,
+    HookFailure, HookSpec, finish_named_install, install_registered_hooks, probe_hook,
 };
 
 /// User-facing hook declaration macros.
@@ -174,10 +177,15 @@ pub mod __macro_support {
         ObjcMethodKind, into_objc_class, into_objc_method, into_objc_selector,
     };
     #[cfg(feature = "registry")]
+    pub use crate::registry::intercept::{
+        INTERCEPTION_OBSERVERS, INTERCEPTION_OVERRIDES, INTERCEPTION_SIGNALS, InterceptionMode,
+        InterceptionObserverCallback, InterceptionObserverDef, InterceptionOverrideDef,
+        InterceptionSignalDef, Signal, dispatch_interception, dispatch_signal, next_interception,
+        record_interception,
+    };
+    #[cfg(feature = "registry")]
     pub use crate::registry::{
-        HOOKS, HookDef, HookSpec, INTERCEPTION_OBSERVERS, INTERCEPTION_OVERRIDES, InterceptionMode,
-        InterceptionObserverDef, InterceptionOverrideDef, finish_install, finish_named_install,
-        probe_hook, record_interception, register_interception_hook,
+        HOOKS, HookDef, HookSpec, finish_install, finish_named_install, probe_hook,
     };
     #[cfg(feature = "registry")]
     pub use linkme::distributed_slice;

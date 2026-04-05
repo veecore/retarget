@@ -1,7 +1,7 @@
 use retarget::hook;
 
-#[hook::function]
-unsafe extern "C" fn missing_target(value: i32) -> i32 {
+#[hook::function(optional = true, "puts")]
+unsafe extern "C" fn positional_target_after_named_arg(value: i32) -> i32 {
     value
 }
 

@@ -1,19 +1,33 @@
 //! Windows tests for statically available function and object hooks.
 
 use retarget::{
-    InterceptionEvent, InterceptionMode, InterceptionState, hook, install_registered_hooks,
-    interception_snapshot,
+    hook, install_registered_hooks,
+    intercept::{Event, Mode},
 };
 use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 use windows::Win32::System::Com::{IStream, STGC_DEFAULT};
 use windows::core::{HRESULT, Interface};
 
 /// Enables interception tracking for this integration test binary.
-#[hook::observer(default = EveryHit)]
-fn observe_interception(_: InterceptionEvent) {}
+#[hook::observer(default = Mode::EveryHit)]
+fn observe_interception(event: Event) {
+    events()
+        .lock()
+        .expect("event buffer should stay available")
+        .push(event);
+}
+
+fn events() -> &'static Mutex<Vec<Event>> {
+    static EVENTS: OnceLock<Mutex<Vec<Event>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn take_events() -> Vec<Event> {
+    std::mem::take(&mut *events().lock().expect("event buffer should stay available"))
+}
 
 #[link(kind = "static", name = "hook_test_target_static")]
 unsafe extern "C" {
@@ -49,6 +63,8 @@ impl StreamHooks {
 /// Installs the registered static hooks and verifies both function and COM interception.
 #[test]
 fn windows_intercepts_static_function_and_com_hooks() {
+    take_events();
+
     let baseline = unsafe { linked_hook_test_add_one(2) };
     assert_eq!(baseline, 3);
 
@@ -69,10 +85,10 @@ fn windows_intercepts_static_function_and_com_hooks() {
         unsafe { stream.Commit(STGC_DEFAULT) }.expect_err("expected detoured IStream::Commit");
     assert_eq!(commit_error.code(), HRESULT(0x80004005u32 as i32));
 
-    let snapshot = interception_snapshot();
-    assert_hook_observed(&snapshot, "hooked_linked_hook_test_add_one");
-    assert_hook_observed(&snapshot, "StreamHooks::set_size");
-    assert_hook_observed(&snapshot, "StreamHooks::commit");
+    let events = take_events();
+    assert_hook_observed(&events, "hooked_linked_hook_test_add_one");
+    assert_hook_observed(&events, "StreamHooks::set_size");
+    assert_hook_observed(&events, "StreamHooks::commit");
 }
 
 fn test_stream() -> IStream {
@@ -97,17 +113,11 @@ fn stream_slot() -> &'static usize {
     })
 }
 
-fn assert_hook_observed(snapshot: &[InterceptionEvent], suffix: &str) {
-    let event = snapshot
+fn assert_hook_observed(events: &[Event], suffix: &str) {
+    let event = events
         .iter()
         .find(|event| event.hook_id.ends_with(suffix))
-        .unwrap_or_else(|| panic!("expected interception snapshot entry for {suffix}"));
+        .unwrap_or_else(|| panic!("expected interception event for {suffix}"));
 
-    assert_eq!(event.mode, InterceptionMode::EveryHit);
-    match &event.state {
-        InterceptionState::Observed { count, .. } => assert!(*count >= 1),
-        InterceptionState::Unobserved => {
-            panic!("expected observed interception state for {suffix}")
-        }
-    }
+    assert_eq!(event.mode, Mode::EveryHit);
 }
