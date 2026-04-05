@@ -1,7 +1,7 @@
 //! Proc-macro entrypoints for the hook attribute surface.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-compile_error!("BalanceWork only supports macOS and Windows");
+compile_error!("retarget only supports macOS and Windows");
 
 mod args;
 mod callable;

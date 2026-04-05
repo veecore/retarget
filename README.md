@@ -17,7 +17,7 @@ Current goals:
 - make hook declarations small and typed
 - keep macro-support details internal
 - keep observation generic and separate from product reporting
-- remove BalanceWork-shaped metadata and legacy macro arguments
+- remove legacy metadata and macro arguments
 
 Current intended feel:
 

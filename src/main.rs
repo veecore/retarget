@@ -16,10 +16,8 @@ fn main() {
     let _original =
         unsafe { function.replace_with(open) }.expect("getpid hook installation must succeed");
 
-    let err = File::open(
-        "/Users/tundeoladipupo/RustProjects/BalanceWork/labs/blinder_hooking_fork/src/main.rs",
-    )
-    .expect_err("Hook fails call");
+    let err = File::open(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
+        .expect_err("Hook fails call");
 
     // Let's see what stdlib thinks the last error is for kicks
     println!("{err}")
