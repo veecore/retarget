@@ -1,0 +1,5 @@
+error: missing required `class` argument; supply it on #[hook::objc::methods(...)] or this method
+ --> tests/ui/macos/objc_impl_missing_class.rs:6:26
+  |
+6 |     unsafe extern "C" fn hash(this: *mut std::ffi::c_void, cmd: *mut std::ffi::c_void) -> usize {
+  |                          ^^^^

@@ -1,0 +1,5 @@
+error: unsupported hook argument
+ --> tests/ui/common/function_unsupported_argument.rs:3:18
+  |
+3 | #[hook::function(symbol = "puts")]
+  |                  ^^^^^^

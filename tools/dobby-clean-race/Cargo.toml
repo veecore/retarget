@@ -1,0 +1,10 @@
+[package]
+name = "dobby_clean_race"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[workspace]
+
+[dependencies]
+libc = "0.2"

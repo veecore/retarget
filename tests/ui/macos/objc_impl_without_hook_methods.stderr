@@ -1,0 +1,5 @@
+error: hook_objc_impl requires at least one method annotated with #[hook::objc::instance(...)] or #[hook::objc::class(...)]
+ --> tests/ui/macos/objc_impl_without_hook_methods.rs:4:6
+  |
+4 | impl MissingObjcHookMethods {
+  |      ^^^^^^^^^^^^^^^^^^^^^^

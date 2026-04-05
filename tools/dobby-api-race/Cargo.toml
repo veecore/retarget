@@ -1,0 +1,9 @@
+[package]
+name = "dobby_api_race"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+dobby-api = "1.0.1"
