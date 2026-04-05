@@ -145,6 +145,14 @@ fn build_vendored_dobby(target: &str) {
         println!("cargo:rerun-if-changed={}", source_dir.join(rel).display());
     }
 
+    // `cargo publish` verifies from `target/package/...`, so stale CMake caches
+    // from an earlier source root must be cleared before reconfiguring.
+    if build_dir.exists() {
+        fs::remove_dir_all(&build_dir).expect("failed to reset Dobby build directory");
+    }
+    if lib_dir.exists() {
+        fs::remove_dir_all(&lib_dir).expect("failed to reset Dobby library output directory");
+    }
     fs::create_dir_all(&build_dir).expect("failed to create Dobby build directory");
     fs::create_dir_all(&lib_dir).expect("failed to create Dobby library output directory");
 
