@@ -1,8 +1,8 @@
 //! macOS static or build-linked function-hook integration tests.
 
 use retarget::{
-    Signal, hook, install_registered_hooks,
-    intercept::Mode,
+    hook, install_registered_hooks,
+    intercept::{Mode, Signal},
 };
 use std::sync::{Mutex, OnceLock};
 

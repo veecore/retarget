@@ -6,11 +6,16 @@ use syn::parse::{Parse, Parser};
 use syn::punctuated::Punctuated;
 use syn::{Expr, ExprArray, ExprAssign, ExprPath, Ident, Path, Result, Token, Type};
 
+// Shared parser macros
+
 /// Parses one comma-separated nested-meta list into one typed args struct.
 macro_rules! parse_nested_args {
     ($attr:expr, $args:ident, $unsupported:literal, {
         $($name:expr => $parser:ident($slot:expr)),* $(,)?
     }) => {{
+        // Most hook attrs use the normal `name = value` nested-meta shape, so
+        // this macro lets the individual parsers stay declarative instead of
+        // repeating the same `ParseNestedMeta` boilerplate.
         let parser = syn::meta::parser(|meta| {
             $(
                 if meta.path.is_ident($name) {
@@ -39,12 +44,16 @@ macro_rules! define_hook_args {
 
         pub(crate) fn $parse_fn(attr: TokenStream) -> Result<$struct_name> {
             let mut args = $struct_name::default();
+            // These attrs are all "bag of named options" parsers; expansion is
+            // what later decides which combinations are actually meaningful.
             parse_nested_args!(attr, args, $unsupported, {
                 $(stringify!($field) => $parser(&mut args.$field)),*
             })
         }
     };
 }
+
+// Hook argument models and top-level parsers
 
 #[derive(Default)]
 pub(crate) struct HookArgs {
@@ -66,6 +75,9 @@ pub(crate) fn parse_hook_args(attr: TokenStream) -> Result<HookArgs> {
                 parse_named_hook_arg(&mut args, assign)?;
             }
             value => {
+                // `#[hook::c("symbol", optional = true)]` is allowed, but once
+                // we have crossed into named args we keep the rest named so the
+                // grammar stays easy to reason about.
                 if saw_named {
                     return Err(syn::Error::new_spanned(
                         value,
@@ -132,7 +144,7 @@ pub(crate) struct HookObserveArgs {
     pub(crate) mode: Option<Path>,
 }
 
-/// Parses `#[hook::observe(...)]` for either a typed payload, a mode override, or both.
+/// Parses `#[hook::observe(...)]` for either a typed payload, a mode override, both, or neither.
 pub(crate) fn parse_hook_observe_args(attr: TokenStream) -> Result<HookObserveArgs> {
     parse_hook_observe_args_tokens(attr.into())
 }
@@ -150,6 +162,10 @@ pub(crate) fn parse_hook_observe_args_tokens(attr: TokenStream2) -> Result<HookO
                 parse_named_observe_arg(&mut args, assign)?;
             }
             value => {
+                // The positional observe grammar intentionally stays tiny:
+                // one mode path, one payload expression, or both. We detect the
+                // known mode spellings first and treat everything else as the
+                // typed payload value.
                 if saw_named {
                     return Err(syn::Error::new_spanned(
                         value,
@@ -172,14 +188,67 @@ pub(crate) fn parse_hook_observe_args_tokens(attr: TokenStream2) -> Result<HookO
         }
     }
 
-    if args.value.is_none() && args.mode.is_none() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "hook::observe expects a payload expression, an interception mode, or both",
-        ));
-    }
-
     Ok(args)
+}
+
+/// Returns the requested interception mode path when the expression names a supported mode.
+fn interception_mode_path(expr: &Expr) -> Option<Path> {
+    let Expr::Path(ExprPath {
+        qself: None, path, ..
+    }) = expr
+    else {
+        return None;
+    };
+    // Accept fully qualified spellings like `retarget::intercept::EveryHit`
+    // while still rejecting arbitrary paths that are not one of the known
+    // interception modes.
+    let mode_ident = path.segments.last()?.ident.to_string();
+    matches!(mode_ident.as_str(), "Off" | "FirstHit" | "EveryHit").then(|| path.clone())
+}
+
+// Shared parsing helpers
+
+/// Parses one `name = value` style hook argument for `#[hook::c(...)]`.
+fn parse_named_hook_arg(args: &mut HookArgs, assign: ExprAssign) -> Result<()> {
+    let name = assign_name(&assign)?;
+    let value = *assign.right;
+
+    match name.as_str() {
+        "name" => set_expr_slot(&mut args.name, value, &assign.left, &name),
+        "function" => set_expr_slot(&mut args.function, value, &assign.left, &name),
+        "optional" => set_expr_slot(&mut args.optional, value, &assign.left, &name),
+        "fallback" => set_expr_slot(&mut args.fallback, value, &assign.left, &name),
+        _ => Err(syn::Error::new_spanned(
+            assign.left,
+            "unsupported hook argument",
+        )),
+    }
+}
+
+/// Parses one `name = value` style observe argument for `#[hook::observe(...)]`.
+fn parse_named_observe_arg(args: &mut HookObserveArgs, assign: ExprAssign) -> Result<()> {
+    let name = assign_name(&assign)?;
+    let value = *assign.right;
+
+    match name.as_str() {
+        "value" => set_expr_slot(&mut args.value, value, &assign.left, &name),
+        "mode" => {
+            // Keep mode parsing aligned between positional and named forms so
+            // `#[hook::observe(Mode::FirstHit)]` and
+            // `#[hook::observe(mode = Mode::FirstHit)]` normalize the same way.
+            let mode = interception_mode_path(&value).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    value,
+                    "unsupported interception mode; expected `Off`, `FirstHit`, or `EveryHit`",
+                )
+            })?;
+            set_path_slot(&mut args.mode, mode, &assign.left, &name)
+        }
+        _ => Err(syn::Error::new_spanned(
+            assign.left,
+            "unsupported observe argument",
+        )),
+    }
 }
 
 /// Parses one single-assignment nested-meta value into one optional slot.
@@ -207,51 +276,6 @@ fn parse_expr_array_slot(
     let value: ExprArray = meta.value()?.parse()?;
     slot.extend(value.elems);
     Ok(())
-}
-
-/// Builds the shared duplicate-argument parse error.
-fn duplicate_arg(meta: &syn::meta::ParseNestedMeta, name: &str) -> syn::Error {
-    meta.error(format!("duplicate `{name}` argument"))
-}
-
-/// Parses one `name = value` style hook argument for `#[hook::c(...)]`.
-fn parse_named_hook_arg(args: &mut HookArgs, assign: ExprAssign) -> Result<()> {
-    let name = assign_name(&assign)?;
-    let value = *assign.right;
-
-    match name.as_str() {
-        "name" => set_expr_slot(&mut args.name, value, &assign.left, &name),
-        "function" => set_expr_slot(&mut args.function, value, &assign.left, &name),
-        "optional" => set_expr_slot(&mut args.optional, value, &assign.left, &name),
-        "fallback" => set_expr_slot(&mut args.fallback, value, &assign.left, &name),
-        _ => Err(syn::Error::new_spanned(
-            assign.left,
-            "unsupported hook argument",
-        )),
-    }
-}
-
-/// Parses one `name = value` style observe argument for `#[hook::observe(...)]`.
-fn parse_named_observe_arg(args: &mut HookObserveArgs, assign: ExprAssign) -> Result<()> {
-    let name = assign_name(&assign)?;
-    let value = *assign.right;
-
-    match name.as_str() {
-        "value" => set_expr_slot(&mut args.value, value, &assign.left, &name),
-        "mode" => {
-            let mode = interception_mode_path(&value).ok_or_else(|| {
-                syn::Error::new_spanned(
-                    value,
-                    "unsupported interception mode; expected `Off`, `FirstHit`, or `EveryHit`",
-                )
-            })?;
-            set_path_slot(&mut args.mode, mode, &assign.left, &name)
-        }
-        _ => Err(syn::Error::new_spanned(
-            assign.left,
-            "unsupported observe argument",
-        )),
-    }
 }
 
 /// Extracts the assigned argument name from one `name = value` expression.
@@ -289,14 +313,7 @@ fn set_path_slot(slot: &mut Option<Path>, value: Path, span: &Expr, name: &str) 
     Ok(())
 }
 
-/// Returns the requested interception mode path when the expression names a supported mode.
-fn interception_mode_path(expr: &Expr) -> Option<Path> {
-    let Expr::Path(ExprPath {
-        qself: None, path, ..
-    }) = expr
-    else {
-        return None;
-    };
-    let mode_ident = path.segments.last()?.ident.to_string();
-    matches!(mode_ident.as_str(), "Off" | "FirstHit" | "EveryHit").then(|| path.clone())
+/// Builds the shared duplicate-argument parse error.
+fn duplicate_arg(meta: &syn::meta::ParseNestedMeta, name: &str) -> syn::Error {
+    meta.error(format!("duplicate `{name}` argument"))
 }

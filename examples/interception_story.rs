@@ -1,4 +1,4 @@
-use retarget::{Signal, hook, install_registered_hooks};
+use retarget::{hook, install_registered_hooks, intercept::Signal};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +65,8 @@ fn main() -> std::io::Result<()> {
 
     for observed in take_events() {
         println!(
-            "observed {:?} via {} at {}",
-            observed.signal.value, observed.signal.event.hook_id, observed.signal.event.unix_ms
+            "observed {:?} via {} at {:?}",
+            observed.signal.value, observed.signal.event.hook_id, observed.signal.event.at
         );
     }
 

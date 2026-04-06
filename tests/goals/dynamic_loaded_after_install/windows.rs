@@ -28,7 +28,7 @@ fn take_events() -> Vec<Event> {
 }
 
 /// Intercepts one function exported from the helper target DLL.
-#[hook::observe(Mode::EveryHit)]
+#[hook::observe]
 #[hook::c(("hook_test_target.dll", "hook_test_add_one"))]
 unsafe extern "system" fn hook_test_add_one(value: i32) -> i32 {
     forward!() + 100

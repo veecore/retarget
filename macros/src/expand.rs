@@ -1,28 +1,27 @@
 //! Hook expansion logic shared by the proc-macro entrypoints.
 
-use crate::args::{
-    HookArgs, HookComArgs, HookComImplArgs, HookObjcArgs, HookObjcImplArgs, HookObserveArgs,
-    HookObserverArgs,
-};
+use crate::args::{HookArgs, HookComArgs, HookComImplArgs, HookObjcArgs, HookObjcImplArgs};
 use crate::callable::HookCallableMeta;
+use crate::observe::{inject_observe_dispatch, take_observe_args};
 use crate::support::{
     FunctionLikeHook, attr_path_ends_with, default_function_target_expr, derive_c_hook_name_expr,
     derive_com_field_ident, derive_com_method_name_expr, derive_function_hook_name_expr,
     derive_hook_id_expr, derive_impl_hook_id_expr, derive_objc_hook_name_expr,
-    emit_function_like_hook, emit_interception_override, emit_interception_signal,
-    interception_mode_tokens, module_slice_expr, optional_image_expr, require_arg,
-    required_image_expr, required_objc_method_expr, required_symbol_expr, try_function_expr,
-    type_last_ident,
+    emit_function_like_hook, module_slice_expr, require_arg, required_image_expr,
+    required_objc_method_expr, required_symbol_expr, try_function_expr, type_last_ident,
 };
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{
-    Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemFn, ItemImpl,
-    PathArguments, Result, Type,
-};
+use syn::{Expr, Ident, ImplItem, ImplItemFn, ItemFn, ItemImpl, Result, Type};
+
+// Free-function hook expansion
 
 /// Expands one free-function hook into the generated install/accessor items.
-pub(crate) fn expand_hook(args: HookArgs, function: ItemFn) -> Result<TokenStream2> {
+pub(crate) fn expand_hook(args: HookArgs, mut function: ItemFn) -> Result<TokenStream2> {
+    // Strip any standalone `#[hook::observe(...)]` before we parse the callable
+    // itself so the rest of expansion can treat observation as just another
+    // optional rewrite step.
+    let observe = take_observe_args(&mut function.attrs)?;
     let mut meta = HookCallableMeta::parse_function(function)?;
 
     let function_target = args
@@ -50,49 +49,51 @@ pub(crate) fn expand_hook(args: HookArgs, function: ItemFn) -> Result<TokenStrea
     let hook_id = derive_hook_id_expr(&fn_ident);
     let function_value = try_function_expr(function_target.clone());
 
-    let fn_ty_ident = format_ident!("__blinder_c_hook_ty_{}", fn_ident);
-    let fallback_ident = format_ident!("__blinder_c_hook_fallback_{}", fn_ident);
-    let original_ident = format_ident!("__blinder_c_hook_original_{}", fn_ident);
-    let original_lock_ident = format_ident!("__BLINDER_C_HOOK_ORIGINAL_{}", fn_ident);
-    let intercept_once_ident = format_ident!("__BLINDER_C_HOOK_INTERCEPT_{}", fn_ident);
-    let accessor_ident = format_ident!("__blinder_c_hook_get_original_{}", fn_ident);
-    let install_ident = format_ident!("__blinder_c_hook_install_{}", fn_ident);
-    let hook_def_ident = format_ident!("__BLINDER_C_HOOK_DEF_{}", fn_ident);
-    let observe_def_ident = format_ident!("__BLINDER_C_HOOK_OBSERVE_{}", fn_ident);
-    let signal_def_ident = format_ident!("__BLINDER_C_HOOK_SIGNAL_{}", fn_ident);
+    let fn_ty_ident = format_ident!("__retarget_c_hook_ty_{}", fn_ident);
+    let fallback_ident = format_ident!("__retarget_c_hook_fallback_{}", fn_ident);
+    let original_ident = format_ident!("__retarget_c_hook_original_{}", fn_ident);
+    let original_lock_ident = format_ident!("__RETARGET_C_HOOK_ORIGINAL_{}", fn_ident);
+    let intercept_once_ident = format_ident!("__RETARGET_C_HOOK_INTERCEPT_{}", fn_ident);
+    let accessor_ident = format_ident!("__retarget_c_hook_get_original_{}", fn_ident);
+    let install_ident = format_ident!("__retarget_c_hook_install_{}", fn_ident);
+    let hook_def_ident = format_ident!("__RETARGET_C_HOOK_DEF_{}", fn_ident);
     let replacement_value = quote!(#fn_ident as #fn_ty_ident);
-    let observe_override_items =
-        emit_interception_override(&observe_def_ident, &hook_id, meta.observe_mode(), &fn_ident)?;
-    let observe_signal_items =
-        emit_interception_signal(&signal_def_ident, &hook_id, meta.observe_value())?;
-    let observe_items = quote! {
-        #observe_override_items
-        #observe_signal_items
-    };
 
+    // Rewrite the user body in two passes: first add `forward!()`, then splice
+    // in any requested observation at the function head.
     meta.inject_forward_helper(&fn_ty_ident, &original_ident)?;
-    meta.inject_interception_recorder(&hook_id, &intercept_once_ident)?;
+    inject_observe_dispatch(
+        meta.block_mut(),
+        &hook_id,
+        &intercept_once_ident,
+        observe.as_ref(),
+        &fn_ident,
+    )?;
 
     let install_body = quote! {
         if #original_lock_ident.get().is_some() {
             return Ok(());
         }
 
+        // The generated installer keeps just enough metadata for consistent
+        // optional/required install handling; it does not carry target details
+        // beyond what this specific install path needs.
+        let spec = ::retarget::__macro_support::HookSpec {
+            name: #name,
+            optional: #optional,
+        };
+
         let target = match #function_value {
             Ok(target) => target,
             Err(error) => {
-                return ::retarget::__macro_support::finish_named_install(
-                    #name,
-                    #optional,
-                    Err(error),
-                );
+                return ::retarget::__macro_support::finish_install(&spec, Err(error));
             }
         };
 
         let original = unsafe { target.replace_with(#replacement_value) }
             .map_err(|error| std::io::Error::other(format!(
                 "required hook {} failed: {}",
-                #name,
+                spec.name,
                 error,
             )))?;
         let _ = #original_lock_ident.set(original);
@@ -115,12 +116,13 @@ pub(crate) fn expand_hook(args: HookArgs, function: ItemFn) -> Result<TokenStrea
         abi,
         fallback,
         install_body,
-        extra_items: observe_items,
+        extra_items: TokenStream2::new(),
     }))
 }
 
 /// Expands one free-function Objective-C hook into the generated install/accessor items.
-pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<TokenStream2> {
+pub(crate) fn expand_hook_objc(args: HookObjcArgs, mut function: ItemFn) -> Result<TokenStream2> {
+    let observe = take_observe_args(&mut function.attrs)?;
     let mut meta = HookCallableMeta::parse_function(function)?;
 
     let original_accessor = args.original;
@@ -130,7 +132,6 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
         &meta.ident,
         "missing required `selector` argument",
     )?;
-    let selector_value = required_symbol_expr(selector.clone());
     let name = if let Some(name) = args.name {
         name
     } else {
@@ -139,7 +140,6 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
     let kind = args.kind.unwrap_or_else(|| {
         syn::parse_quote!(::retarget::__macro_support::ObjcMethodKind::Instance)
     });
-    let image = optional_image_expr(args.image.clone());
     let optional = args
         .optional
         .clone()
@@ -157,26 +157,22 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
     let hook_id = derive_hook_id_expr(&fn_ident);
     let method_value = required_objc_method_expr(kind.clone(), class.clone(), selector.clone());
 
-    let fn_ty_ident = format_ident!("__blinder_objc_hook_ty_{}", fn_ident);
-    let fallback_ident = format_ident!("__blinder_objc_hook_fallback_{}", fn_ident);
-    let original_ident = format_ident!("__blinder_objc_hook_original_{}", fn_ident);
-    let original_lock_ident = format_ident!("__BLINDER_OBJC_HOOK_ORIGINAL_{}", fn_ident);
-    let intercept_once_ident = format_ident!("__BLINDER_OBJC_HOOK_INTERCEPT_{}", fn_ident);
-    let install_ident = format_ident!("__blinder_objc_hook_install_{}", fn_ident);
-    let hook_def_ident = format_ident!("__BLINDER_OBJC_HOOK_DEF_{}", fn_ident);
-    let observe_def_ident = format_ident!("__BLINDER_OBJC_HOOK_OBSERVE_{}", fn_ident);
-    let signal_def_ident = format_ident!("__BLINDER_OBJC_HOOK_SIGNAL_{}", fn_ident);
-    let observe_override_items =
-        emit_interception_override(&observe_def_ident, &hook_id, meta.observe_mode(), &fn_ident)?;
-    let observe_signal_items =
-        emit_interception_signal(&signal_def_ident, &hook_id, meta.observe_value())?;
-    let observe_items = quote! {
-        #observe_override_items
-        #observe_signal_items
-    };
+    let fn_ty_ident = format_ident!("__retarget_objc_hook_ty_{}", fn_ident);
+    let fallback_ident = format_ident!("__retarget_objc_hook_fallback_{}", fn_ident);
+    let original_ident = format_ident!("__retarget_objc_hook_original_{}", fn_ident);
+    let original_lock_ident = format_ident!("__RETARGET_OBJC_HOOK_ORIGINAL_{}", fn_ident);
+    let intercept_once_ident = format_ident!("__RETARGET_OBJC_HOOK_INTERCEPT_{}", fn_ident);
+    let install_ident = format_ident!("__retarget_objc_hook_install_{}", fn_ident);
+    let hook_def_ident = format_ident!("__RETARGET_OBJC_HOOK_DEF_{}", fn_ident);
 
     meta.inject_forward_helper(&fn_ty_ident, &original_ident)?;
-    meta.inject_interception_recorder(&hook_id, &intercept_once_ident)?;
+    inject_observe_dispatch(
+        meta.block_mut(),
+        &hook_id,
+        &intercept_once_ident,
+        observe.as_ref(),
+        &fn_ident,
+    )?;
 
     let accessor_item = original_accessor.map(|accessor_ident| {
         quote! {
@@ -192,6 +188,9 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
     Ok(quote! {
         #input
 
+        // Objective-C free-function hooks are still emitted through the same
+        // function-like scaffold; this hand-written branch only exists because
+        // the method resolution/install path is different from plain functions.
         #[allow(non_camel_case_types)]
         type #fn_ty_ident = #unsafety #abi fn(#(#arg_tys),*) -> #ret_ty;
 
@@ -226,8 +225,6 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
 
             let spec = ::retarget::__macro_support::HookSpec {
                 name: #name,
-                symbol: #selector_value,
-                module: #image,
                 optional: #optional,
             };
             let method = match #method_value {
@@ -248,18 +245,16 @@ pub(crate) fn expand_hook_objc(args: HookObjcArgs, function: ItemFn) -> Result<T
             ::retarget::__macro_support::HookDef {
                 install: #install_ident,
             };
-
-        #observe_items
     })
 }
 
 /// Expands one free-function COM hook into the generated install/accessor items.
-pub(crate) fn expand_hook_com(args: HookComArgs, function: ItemFn) -> Result<TokenStream2> {
+pub(crate) fn expand_hook_com(args: HookComArgs, mut function: ItemFn) -> Result<TokenStream2> {
+    let observe = take_observe_args(&mut function.attrs)?;
     let mut meta = HookCallableMeta::parse_function(function)?;
 
     let name = com_hook_name_expr(&args, &meta.ident, None)?;
     let symbol_value = com_hook_symbol_expr(&args, &name);
-    let image = optional_image_expr(args.image.clone());
     let optional = args
         .optional
         .clone()
@@ -276,38 +271,33 @@ pub(crate) fn expand_hook_com(args: HookComArgs, function: ItemFn) -> Result<Tok
     let abi = meta.abi.clone();
     let hook_id = derive_hook_id_expr(&fn_ident);
 
-    let fn_ty_ident = format_ident!("__blinder_com_hook_ty_{}", fn_ident);
-    let fallback_ident = format_ident!("__blinder_com_hook_fallback_{}", fn_ident);
-    let original_ident = format_ident!("__blinder_com_hook_original_{}", fn_ident);
-    let original_lock_ident = format_ident!("__BLINDER_WINDOWS_HOOK_ORIGINAL_{}", fn_ident);
-    let intercept_once_ident = format_ident!("__BLINDER_COM_HOOK_INTERCEPT_{}", fn_ident);
-    let install_ident = format_ident!("__blinder_com_hook_install_{}", fn_ident);
-    let hook_def_ident = format_ident!("__BLINDER_COM_HOOK_DEF_{}", fn_ident);
+    let fn_ty_ident = format_ident!("__retarget_com_hook_ty_{}", fn_ident);
+    let fallback_ident = format_ident!("__retarget_com_hook_fallback_{}", fn_ident);
+    let original_ident = format_ident!("__retarget_com_hook_original_{}", fn_ident);
+    let original_lock_ident = format_ident!("__RETARGET_WINDOWS_HOOK_ORIGINAL_{}", fn_ident);
+    let intercept_once_ident = format_ident!("__RETARGET_COM_HOOK_INTERCEPT_{}", fn_ident);
+    let install_ident = format_ident!("__retarget_com_hook_install_{}", fn_ident);
+    let hook_def_ident = format_ident!("__RETARGET_COM_HOOK_DEF_{}", fn_ident);
     let accessor_ident = args
         .original
         .clone()
-        .unwrap_or_else(|| format_ident!("__blinder_com_hook_get_original_{}", fn_ident));
+        .unwrap_or_else(|| format_ident!("__retarget_com_hook_get_original_{}", fn_ident));
     let replacement_value = quote!(#fn_ident as #fn_ty_ident);
     let resolve_value = com_hook_resolve_expr(&args, None, &symbol_value, &fn_ty_ident);
-    let observe_def_ident = format_ident!("__BLINDER_COM_HOOK_OBSERVE_{}", fn_ident);
-    let signal_def_ident = format_ident!("__BLINDER_COM_HOOK_SIGNAL_{}", fn_ident);
-    let observe_override_items =
-        emit_interception_override(&observe_def_ident, &hook_id, meta.observe_mode(), &fn_ident)?;
-    let observe_signal_items =
-        emit_interception_signal(&signal_def_ident, &hook_id, meta.observe_value())?;
-    let observe_items = quote! {
-        #observe_override_items
-        #observe_signal_items
-    };
 
     meta.inject_forward_helper(&fn_ty_ident, &original_ident)?;
-    meta.inject_interception_recorder(&hook_id, &intercept_once_ident)?;
+    inject_observe_dispatch(
+        meta.block_mut(),
+        &hook_id,
+        &intercept_once_ident,
+        observe.as_ref(),
+        &fn_ident,
+    )?;
 
     let install_body = com_install_body(ComInstallPlan {
         args: &args,
         name,
         symbol_value,
-        image,
         optional,
         original_lock_ident: original_lock_ident.clone(),
         replacement_value,
@@ -330,9 +320,11 @@ pub(crate) fn expand_hook_com(args: HookComArgs, function: ItemFn) -> Result<Tok
         abi,
         fallback,
         install_body,
-        extra_items: observe_items,
+        extra_items: TokenStream2::new(),
     }))
 }
+
+// Impl-block hook expansion
 
 /// Expands one impl block containing COM hook methods.
 pub(crate) fn expand_hook_com_impl(
@@ -357,6 +349,9 @@ pub(crate) fn expand_hook_com_impl(
         };
         saw_methods = true;
 
+        // `#[hook::com_impl]` makes the per-method `#[hook::com(...)]`
+        // attribute optional. If it is absent we still expand the method using
+        // name/default inference from the impl context.
         let mut hook_attr = None;
         method.attrs.retain(|attr| {
             if attr_path_ends_with(attr, "com") {
@@ -425,6 +420,9 @@ pub(crate) fn expand_hook_objc_impl(
             continue;
         };
 
+        // Objective-C impl hooks are different: only methods with one of the
+        // explicit kind attrs participate because the method kind is part of
+        // the hook target itself.
         let hook_args = match parse_objc_method_hook_attr(method)? {
             Some(hook_args) => hook_args,
             None => continue,
@@ -450,58 +448,7 @@ pub(crate) fn expand_hook_objc_impl(
     })
 }
 
-/// Expands one interception observer definition.
-pub(crate) fn expand_hook_observer(
-    args: HookObserverArgs,
-    function: ItemFn,
-) -> Result<TokenStream2> {
-    let fn_ident = function.sig.ident.clone();
-    let default = require_arg(
-        args.default,
-        &fn_ident,
-        "missing required `default` argument",
-    )?;
-    let default_mode = interception_mode_tokens(&default, &fn_ident)?;
-    let def_ident = format_ident!(
-        "__BLINDER_INTERCEPTION_OBSERVER_{}",
-        fn_ident.to_string().to_ascii_uppercase()
-    );
-    let callback_ident = format_ident!(
-        "__blinder_interception_observer_callback_{}",
-        fn_ident.to_string().to_ascii_lowercase()
-    );
-    let (callback_items, callback_expr) =
-        observer_callback_tokens(&function, &fn_ident, &callback_ident)?;
-
-    Ok(quote! {
-        #function
-
-        #[cfg(feature = "registry")]
-        #callback_items
-
-        #[cfg(feature = "registry")]
-        #[allow(non_upper_case_globals)]
-        #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::INTERCEPTION_OBSERVERS)]
-        static #def_ident: ::retarget::__macro_support::InterceptionObserverDef =
-            ::retarget::__macro_support::InterceptionObserverDef {
-                default_mode: #default_mode,
-                callback: #callback_expr,
-            };
-    })
-}
-
-/// Re-emits one observe helper attribute as an inert marker for later hook expansion.
-pub(crate) fn expand_hook_observe(args: HookObserveArgs, function: ItemFn) -> Result<TokenStream2> {
-    let marker = syn::LitStr::new(
-        &format!("__retarget_observe({})", observe_marker_tokens(&args)),
-        proc_macro2::Span::call_site(),
-    );
-
-    Ok(quote! {
-        #[doc = #marker]
-        #function
-    })
-}
+// Per-method expansion
 
 /// The generated tokens for one expanded COM impl method.
 struct HookComMethodExpansion {
@@ -523,10 +470,11 @@ struct HookObjcMethodExpansion {
 fn expand_hook_com_method(
     impl_args: &HookComImplArgs,
     args: HookComArgs,
-    method: ImplItemFn,
+    mut method: ImplItemFn,
     self_ty: &Type,
     type_ident: &Ident,
 ) -> Result<HookComMethodExpansion> {
+    let observe = take_observe_args(&mut method.attrs)?;
     let mut meta = HookCallableMeta::parse_method(method)?;
 
     let field_ident = args
@@ -535,7 +483,6 @@ fn expand_hook_com_method(
         .unwrap_or_else(|| derive_com_field_ident(&meta.ident));
     let name = com_hook_name_expr(&args, &meta.ident, Some((impl_args, &field_ident)))?;
     let symbol_value = com_hook_symbol_expr(&args, &name);
-    let image = optional_image_expr(args.image.clone());
     let optional = args
         .optional
         .clone()
@@ -553,21 +500,21 @@ fn expand_hook_com_method(
     let hook_id = derive_impl_hook_id_expr(self_ty, &fn_ident);
     let type_ident_snake = type_ident.to_string().to_ascii_lowercase();
 
-    let fn_ty_ident = format_ident!("__blinder_com_hook_ty_{}_{}", type_ident, fn_ident);
-    let fallback_ident = format_ident!("__blinder_com_hook_fallback_{}_{}", type_ident, fn_ident);
-    let original_ident = format_ident!("__blinder_com_hook_original_{}_{}", type_ident, fn_ident);
+    let fn_ty_ident = format_ident!("__retarget_com_hook_ty_{}_{}", type_ident, fn_ident);
+    let fallback_ident = format_ident!("__retarget_com_hook_fallback_{}_{}", type_ident, fn_ident);
+    let original_ident = format_ident!("__retarget_com_hook_original_{}_{}", type_ident, fn_ident);
     let original_lock_ident = format_ident!(
-        "__BLINDER_WINDOWS_HOOK_ORIGINAL_{}_{}",
+        "__RETARGET_WINDOWS_HOOK_ORIGINAL_{}_{}",
         type_ident,
         fn_ident
     );
     let intercept_once_ident =
-        format_ident!("__BLINDER_COM_HOOK_INTERCEPT_{}_{}", type_ident, fn_ident);
-    let install_ident = format_ident!("__blinder_com_hook_install_{}_{}", type_ident, fn_ident);
-    let hook_def_ident = format_ident!("__BLINDER_COM_HOOK_DEF_{}_{}", type_ident, fn_ident);
+        format_ident!("__RETARGET_COM_HOOK_INTERCEPT_{}_{}", type_ident, fn_ident);
+    let install_ident = format_ident!("__retarget_com_hook_install_{}_{}", type_ident, fn_ident);
+    let hook_def_ident = format_ident!("__RETARGET_COM_HOOK_DEF_{}_{}", type_ident, fn_ident);
     let accessor_ident = args.original.clone().unwrap_or_else(|| {
         format_ident!(
-            "__blinder_com_hook_get_original_{}_{}",
+            "__retarget_com_hook_get_original_{}_{}",
             type_ident_snake,
             fn_ident
         )
@@ -579,25 +526,23 @@ fn expand_hook_com_method(
         &symbol_value,
         &fn_ty_ident,
     );
-    let observe_def_ident = format_ident!("__BLINDER_COM_HOOK_OBSERVE_{}_{}", type_ident, fn_ident);
-    let signal_def_ident = format_ident!("__BLINDER_COM_HOOK_SIGNAL_{}_{}", type_ident, fn_ident);
-    let observe_override_items =
-        emit_interception_override(&observe_def_ident, &hook_id, meta.observe_mode(), &fn_ident)?;
-    let observe_signal_items =
-        emit_interception_signal(&signal_def_ident, &hook_id, meta.observe_value())?;
-    let observe_items = quote! {
-        #observe_override_items
-        #observe_signal_items
-    };
 
+    // For impl methods the generated replacement value points back at the
+    // inherent method item, but the body rewriting is otherwise identical to
+    // the free-function case.
     meta.inject_forward_helper(&fn_ty_ident, &original_ident)?;
-    meta.inject_interception_recorder(&hook_id, &intercept_once_ident)?;
+    inject_observe_dispatch(
+        meta.block_mut(),
+        &hook_id,
+        &intercept_once_ident,
+        observe.as_ref(),
+        &fn_ident,
+    )?;
 
     let install_body = com_install_body(ComInstallPlan {
         args: &args,
         name,
         symbol_value,
-        image,
         optional,
         original_lock_ident: original_lock_ident.clone(),
         replacement_value,
@@ -621,7 +566,7 @@ fn expand_hook_com_method(
         abi,
         fallback,
         install_body,
-        extra_items: observe_items,
+        extra_items: TokenStream2::new(),
     });
 
     Ok(HookComMethodExpansion { method, generated })
@@ -631,10 +576,11 @@ fn expand_hook_com_method(
 fn expand_hook_objc_method(
     impl_args: &HookObjcImplArgs,
     args: HookObjcArgs,
-    method: ImplItemFn,
+    mut method: ImplItemFn,
     self_ty: &Type,
     type_ident: &Ident,
 ) -> Result<HookObjcMethodExpansion> {
+    let observe = take_observe_args(&mut method.attrs)?;
     let mut meta = HookCallableMeta::parse_method(method)?;
 
     let class = args.class.clone().or_else(|| impl_args.class.clone()).ok_or_else(|| {
@@ -654,13 +600,11 @@ fn expand_hook_objc_method(
         )
     })?;
     let original_accessor = args.original;
-    let selector_value = required_symbol_expr(selector.clone());
     let name = if let Some(name) = args.name {
         name
     } else {
         derive_objc_hook_name_expr(&class, &selector, &meta.ident)?
     };
-    let image = optional_image_expr(args.image.clone().or_else(|| impl_args.image.clone()));
     let optional = args
         .optional
         .clone()
@@ -679,37 +623,31 @@ fn expand_hook_objc_method(
     let type_ident_snake = type_ident.to_string().to_ascii_lowercase();
     let method_value = required_objc_method_expr(kind, class, selector);
 
-    let fn_ty_ident = format_ident!("__blinder_objc_hook_ty_{}_{}", type_ident, fn_ident);
-    let fallback_ident = format_ident!("__blinder_objc_hook_fallback_{}_{}", type_ident, fn_ident);
-    let original_ident = format_ident!("__blinder_objc_hook_original_{}_{}", type_ident, fn_ident);
+    let fn_ty_ident = format_ident!("__retarget_objc_hook_ty_{}_{}", type_ident, fn_ident);
+    let fallback_ident = format_ident!("__retarget_objc_hook_fallback_{}_{}", type_ident, fn_ident);
+    let original_ident = format_ident!("__retarget_objc_hook_original_{}_{}", type_ident, fn_ident);
     let original_lock_ident =
-        format_ident!("__BLINDER_OBJC_HOOK_ORIGINAL_{}_{}", type_ident, fn_ident);
+        format_ident!("__RETARGET_OBJC_HOOK_ORIGINAL_{}_{}", type_ident, fn_ident);
     let intercept_once_ident =
-        format_ident!("__BLINDER_OBJC_HOOK_INTERCEPT_{}_{}", type_ident, fn_ident);
-    let install_ident = format_ident!("__blinder_objc_hook_install_{}_{}", type_ident, fn_ident);
-    let hook_def_ident = format_ident!("__BLINDER_OBJC_HOOK_DEF_{}_{}", type_ident, fn_ident);
-    let observe_def_ident =
-        format_ident!("__BLINDER_OBJC_HOOK_OBSERVE_{}_{}", type_ident, fn_ident);
-    let signal_def_ident =
-        format_ident!("__BLINDER_OBJC_HOOK_SIGNAL_{}_{}", type_ident, fn_ident);
+        format_ident!("__RETARGET_OBJC_HOOK_INTERCEPT_{}_{}", type_ident, fn_ident);
+    let install_ident = format_ident!("__retarget_objc_hook_install_{}_{}", type_ident, fn_ident);
+    let hook_def_ident = format_ident!("__RETARGET_OBJC_HOOK_DEF_{}_{}", type_ident, fn_ident);
     let accessor_ident = original_accessor.unwrap_or_else(|| {
         format_ident!(
-            "__blinder_objc_hook_get_original_{}_{}",
+            "__retarget_objc_hook_get_original_{}_{}",
             type_ident_snake,
             fn_ident
         )
     });
-    let observe_override_items =
-        emit_interception_override(&observe_def_ident, &hook_id, meta.observe_mode(), &fn_ident)?;
-    let observe_signal_items =
-        emit_interception_signal(&signal_def_ident, &hook_id, meta.observe_value())?;
-    let observe_items = quote! {
-        #observe_override_items
-        #observe_signal_items
-    };
 
     meta.inject_forward_helper(&fn_ty_ident, &original_ident)?;
-    meta.inject_interception_recorder(&hook_id, &intercept_once_ident)?;
+    inject_observe_dispatch(
+        meta.block_mut(),
+        &hook_id,
+        &intercept_once_ident,
+        observe.as_ref(),
+        &fn_ident,
+    )?;
 
     let install_body = quote! {
         if #original_lock_ident.get().is_some() {
@@ -718,8 +656,6 @@ fn expand_hook_objc_method(
 
         let spec = ::retarget::__macro_support::HookSpec {
             name: #name,
-            symbol: #selector_value,
-            module: #image,
             optional: #optional,
         };
         let method = match #method_value {
@@ -751,11 +687,13 @@ fn expand_hook_objc_method(
         abi,
         fallback,
         install_body,
-        extra_items: observe_items,
+        extra_items: TokenStream2::new(),
     });
 
     Ok(HookObjcMethodExpansion { method, generated })
 }
+
+// COM-specific install helpers
 
 /// Derives the user-facing hook name for one COM hook.
 fn com_hook_name_expr(
@@ -796,6 +734,8 @@ fn com_hook_resolve_expr(
     fn_ty_ident: &Ident,
 ) -> TokenStream2 {
     if let Some(resolve) = args.resolve.clone() {
+        // The user supplied an explicit resolution path, so we treat it as the
+        // highest-priority way to discover the original function pointer.
         return quote!({
             let value = (#resolve);
             value
@@ -808,6 +748,9 @@ fn com_hook_resolve_expr(
         && let (Some(interface), Some(instance)) =
             (impl_args.interface.as_ref(), impl_args.instance.as_ref())
     {
+        // When COM impl context gives us a live interface pointer, we can pull
+        // the original method directly from that vtable slot instead of doing a
+        // later symbol lookup.
         return quote! {
             ::std::ptr::NonNull::new((#instance) as *mut std::ffi::c_void)
                 .map(|interface| unsafe {
@@ -835,8 +778,6 @@ struct ComInstallPlan<'a> {
     name: Expr,
     /// The resolved symbol expression for diagnostics and fallback resolution.
     symbol_value: Expr,
-    /// The optional image expression for the hook spec.
-    image: Expr,
     /// The optional-install flag expression.
     optional: Expr,
     /// The storage cell for the original implementation.
@@ -853,7 +794,6 @@ fn com_install_body(plan: ComInstallPlan<'_>) -> TokenStream2 {
         args,
         name,
         symbol_value,
-        image,
         optional,
         original_lock_ident,
         replacement_value,
@@ -870,17 +810,17 @@ fn com_install_body(plan: ComInstallPlan<'_>) -> TokenStream2 {
 
         let spec = ::retarget::__macro_support::HookSpec {
             name: #name,
-            symbol: #symbol_value,
-            module: #image,
             optional: #optional,
         };
         let install_images: &[::retarget::__macro_support::Module] = #install_images;
         let resolve_images: &[::retarget::__macro_support::Module] = #resolve_images;
 
+        // Prefer the already-resolved original when we can get it cheaply.
+        // Fall back to symbol lookup only when that first path yields nothing.
         let original = match #resolve_value {
             Ok(Some(target)) => unsafe { target.replace_with(#replacement_value) },
             Ok(None) => {
-                let target = match spec.symbol.resolve_in_modules(install_images) {
+                let target = match #symbol_value.resolve_in_modules(install_images) {
                     Ok(target) => target,
                     Err(error) => {
                         return ::retarget::__macro_support::finish_install(
@@ -906,137 +846,20 @@ fn com_install_body(plan: ComInstallPlan<'_>) -> TokenStream2 {
     }
 }
 
+// Objective-C-specific helpers
+
 /// Uses the Rust method name as the default Objective-C selector.
 fn default_selector_expr(ident: &Ident) -> Expr {
     let selector = syn::LitStr::new(&ident.to_string(), ident.span());
     syn::parse_quote!(#selector)
 }
 
-/// Builds the inert internal marker emitted by `#[hook::observe(...)]`.
-fn observe_marker_tokens(args: &HookObserveArgs) -> TokenStream2 {
-    let value = args.value.as_ref().map(|value| quote!(value = #value));
-    let mode = args.mode.as_ref().map(|mode| quote!(mode = #mode));
-    match (value, mode) {
-        (Some(value), Some(mode)) => quote!(#value, #mode),
-        (Some(value), None) => quote!(#value),
-        (None, Some(mode)) => quote!(#mode),
-        (None, None) => TokenStream2::new(),
-    }
-}
-
-/// Builds the runtime callback registration for one observer function.
-fn observer_callback_tokens(
-    function: &ItemFn,
-    fn_ident: &Ident,
-    callback_ident: &Ident,
-) -> Result<(TokenStream2, TokenStream2)> {
-    match observer_signature(function)? {
-        ObserverSignature::Event => {
-            let event_callback_ident = format_ident!("{}_event", callback_ident);
-            Ok((
-                quote! {
-                    fn #event_callback_ident(event: ::retarget::InterceptionHit) {
-                        #fn_ident(event);
-                    }
-                },
-                quote!(
-                    ::retarget::__macro_support::InterceptionObserverCallback::Event(
-                        #event_callback_ident
-                    )
-                ),
-            ))
-        }
-        ObserverSignature::Signal(signal_ty) => {
-            let emit_ident = format_ident!("{}_emit", callback_ident);
-            let type_id_ident = format_ident!("{}_type_id", callback_ident);
-            let type_name_ident = format_ident!("{}_type_name", callback_ident);
-            let assert_ident = format_ident!(
-                "__BLINDER_INTERCEPTION_SIGNAL_ASSERT_{}",
-                fn_ident.to_string().to_ascii_uppercase()
-            );
-            Ok((
-                quote! {
-                    const #assert_ident: fn() = || {
-                        fn __retarget_assert_signal<T: Clone + 'static>() {}
-                        __retarget_assert_signal::<#signal_ty>();
-                    };
-
-                    fn #type_id_ident() -> ::std::any::TypeId {
-                        ::std::any::TypeId::of::<#signal_ty>()
-                    }
-
-                    fn #type_name_ident() -> &'static str {
-                        ::std::any::type_name::<#signal_ty>()
-                    }
-
-                    unsafe fn #emit_ident(event: ::retarget::InterceptionHit, value: *const ()) {
-                        let value = unsafe { (&*(value.cast::<#signal_ty>())).clone() };
-                        #fn_ident(::retarget::Signal { event, value });
-                    }
-                },
-                quote!(
-                    ::retarget::__macro_support::InterceptionObserverCallback::Signal {
-                        type_id: #type_id_ident,
-                        type_name: #type_name_ident,
-                        emit: #emit_ident,
-                    }
-                ),
-            ))
-        }
-    }
-}
-
-/// One supported observer-function signature shape.
-enum ObserverSignature {
-    /// One event-only observer like `fn(Event)`.
-    Event,
-    /// One typed observer like `fn(Signal<MyEnum>)`.
-    Signal(Type),
-}
-
-/// Parses the supported observer function signature shapes.
-fn observer_signature(function: &ItemFn) -> Result<ObserverSignature> {
-    let inputs: Vec<&FnArg> = function.sig.inputs.iter().collect();
-    match inputs.as_slice() {
-        [FnArg::Typed(arg)] => {
-            if let Some(signal_ty) = signal_value_ty(arg.ty.as_ref()) {
-                Ok(ObserverSignature::Signal(signal_ty))
-            } else {
-                Ok(ObserverSignature::Event)
-            }
-        }
-        _ => Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            "hook::observer expects `fn(Event)` or `fn(Signal<T>)`",
-        )),
-    }
-}
-
-/// Returns the `T` from one observer argument shaped like `Signal<T>`.
-fn signal_value_ty(ty: &Type) -> Option<Type> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-    let segment = type_path.path.segments.last()?;
-    if segment.ident != "Signal" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
-    };
-    if args.args.len() != 1 {
-        return None;
-    }
-    match args.args.first()? {
-        GenericArgument::Type(ty) => Some(ty.clone()),
-        _ => None,
-    }
-}
-
 /// Pulls one Objective-C hook attribute off an impl method and normalizes its kind.
 fn parse_objc_method_hook_attr(method: &mut ImplItemFn) -> Result<Option<HookObjcArgs>> {
     let mut hook_attr = None;
     method.attrs.retain(|attr| {
+        // The impl-level Objective-C surface is split into `instance` and
+        // `class`, but the downstream parser only wants one normalized `kind`.
         let kind: Option<Expr> = if attr_path_ends_with(attr, "instance") {
             Some(syn::parse_quote!(
                 ::retarget::__macro_support::ObjcMethodKind::Instance

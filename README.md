@@ -1,31 +1,39 @@
 # retarget
 
-`retarget` is a work-in-progress hook crate for macOS and Windows.
+`retarget` is a typed hook crate for macOS and Windows with a deliberately
+small, convenient public surface.
 
-It is aimed at small, typed hook declarations over three target families:
+It is built to make native hooks feel straightforward in Rust:
 
 - exported functions
 - Objective-C methods
 - COM methods
 
-The crate is still being shaped in the open, so the API should be treated as
-experimental for now.
+The intended flow is simple:
 
-Current goals:
+- declare hooks near the code that owns them
+- optionally opt hooks into observation
+- call `install_registered_hooks()` once
+
+The crate is still evolving in the open, so the API should be treated as
+experimental for now, but the direction is clear: less boilerplate, fewer
+runtime concepts, and a more readable hook story.
+
+What it is trying to be:
 
 - keep the public API root-first
 - make hook declarations small and typed
 - keep macro-support details internal
 - keep observation generic and separate from product reporting
-- remove legacy metadata and macro arguments
+- make the common path obvious and ergonomic
 
-Current intended feel:
+Intended feel:
 
 ```rust
 use retarget::{
     hook,
-    Signal,
-    intercept::Mode,
+    install_registered_hooks,
+    intercept::{Mode, Signal},
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -75,13 +83,23 @@ let events = std::mem::take(&mut *events().lock().unwrap());
 assert!(events.iter().all(|entry| entry.signal.event.mode != Mode::Off));
 ```
 
-`hook::function` should not expose install-mechanism choices. The macro says what to
-hook, and the crate decides how to install it for the current platform. When
-the Rust function name already matches the export, `#[hook::c]` is enough.
-Otherwise the target accepts either a global symbol like `"GetCursorPos"` or
-one scoped pair like `("user32.dll", "GetCursorPos")`.
-`hook::com_impl` is the intended COM story: group related hooks behind an
-inherent impl block, let method names default to the PascalCase COM field,
-and only override with `#[hook::com(field = ...)]` when the Rust name differs.
+Observation is opt-in per hook. Use `#[hook::observe]` to apply the observer's
+default mode, or pass an explicit payload and/or mode when one hook needs a
+different shape.
 
-Status: work in progress. Expect API churn until the surface settles.
+Some of the design choices behind that feel:
+
+- `hook::c` should describe what to hook, not how installation works
+- `hook::com_impl` is the main COM story, so related hooks can live in one
+  inherent impl block
+- observation is event-oriented and local, not a big retained runtime
+- lower-level target types still exist when you need them, but they are not the
+  first thing the crate asks you to touch
+
+Warnings:
+
+- The crate is still experimental, so expect API churn while the surface
+  settles.
+- Install hooks as early as practical in process startup.
+- Anything under `retarget::__macro_support` and generated `__retarget_*`
+  names is internal and may change without notice.

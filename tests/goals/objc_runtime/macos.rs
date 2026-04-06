@@ -34,6 +34,7 @@ struct NSObjectHooks;
 #[hook::objc::methods(class = "NSObject")]
 impl NSObjectHooks {
     /// Intercepts one instance method while keeping the user-facing code in one impl block.
+    #[hook::observe]
     #[hook::objc::instance]
     unsafe extern "C" fn hash(this: *mut c_void, cmd: *mut c_void) -> usize {
         let _ = (this, cmd);

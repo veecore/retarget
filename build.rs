@@ -267,11 +267,11 @@ fn build_macos_test_dylib() {
     }
 
     println!(
-        "cargo:rustc-env=BLINDER_HOOK_TEST_DYLIB={}",
+        "cargo:rustc-env=RETARGET_HOOK_TEST_DYLIB={}",
         target_output.display()
     );
     println!(
-        "cargo:rustc-env=BLINDER_HOOK_TEST_CALLER_DYLIB={}",
+        "cargo:rustc-env=RETARGET_HOOK_TEST_CALLER_DYLIB={}",
         caller_output.display()
     );
     println!("cargo:rustc-link-search=native={}", out_dir.display());
@@ -332,11 +332,11 @@ fn build_windows_test_dlls() {
     }
 
     println!(
-        "cargo:rustc-env=BLINDER_HOOK_TEST_TARGET_DLL={}",
+        "cargo:rustc-env=RETARGET_HOOK_TEST_TARGET_DLL={}",
         target_output.display()
     );
     println!(
-        "cargo:rustc-env=BLINDER_HOOK_TEST_CALLER_DLL={}",
+        "cargo:rustc-env=RETARGET_HOOK_TEST_CALLER_DLL={}",
         caller_output.display()
     );
 }

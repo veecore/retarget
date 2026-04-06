@@ -1,4 +1,7 @@
 //! Opaque Objective-C hook targets used by method installation on macOS.
+//!
+//! These types model Objective-C hook identity as `(class, selector, kind)`
+//! and then resolve that identity into one replaceable runtime method.
 
 use crate::FunctionPointer;
 use crate::error::{InvalidName, expect_utf8, write_invalid_name};
@@ -10,6 +13,10 @@ use std::fmt;
 use std::ptr::NonNull;
 
 /// One Objective-C method target prepared for installation.
+///
+/// This is the fully resolved Objective-C hook target: the class and selector
+/// have already been looked up in the runtime and tied to either the instance
+/// or class method namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjcMethod {
     /// Resolved runtime method pointer.
@@ -63,6 +70,9 @@ impl ObjcMethod {
     /// The caller must ensure `T` matches the Objective-C method ABI and
     /// signature.
     ///
+    /// On success, the returned function pointer is the original method
+    /// implementation that was replaced.
+    ///
     /// # Safety
     ///
     /// `T` must exactly match the ABI and signature of both the target method
@@ -102,6 +112,10 @@ impl fmt::Display for ObjcMethod {
 }
 
 /// Describes whether one Objective-C hook targets one instance or class method.
+///
+/// Objective-C keeps instance methods and class methods in different method
+/// tables, so this is part of the hook target's identity rather than just
+/// metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjcMethodKind {
     /// One instance method implementation.
@@ -124,6 +138,9 @@ impl fmt::Display for ObjcMethodKind {
 ///
 /// This value preserves the user-facing class identity and one resolved runtime
 /// class pointer.
+///
+/// Use [`ObjcClass::instance_method`] or [`ObjcClass::class_method`] to turn a
+/// class into one concrete hook target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjcClass {
     /// Resolved runtime class pointer.
@@ -177,6 +194,9 @@ impl fmt::Display for ObjcClass {
 ///
 /// Selectors intentionally stay identity-like. The eventual hook target is the
 /// resolved method found from one class, one selector, and one method kind.
+///
+/// A selector by itself is not enough to install a hook; it must still be
+/// paired with a class and method kind.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjcSelector(CString);
 
@@ -413,34 +433,49 @@ impl From<ObjcSelectorError> for ObjcMethodError {
 }
 
 /// Converts one supported value into one resolved [`ObjcMethod`].
+///
+/// Common inputs are an existing [`ObjcMethod`] or one tuple-like identity that
+/// combines a class, selector, and method kind through the provided impls.
 pub trait IntoObjcMethod {
     /// Converts this value into one resolved Objective-C method target.
     fn into_objc_method(self) -> Result<ObjcMethod, ObjcMethodError>;
 }
 
 /// Converts one supported value into one [`ObjcClass`].
+///
+/// Common inputs are existing [`ObjcClass`] values and class names as Rust or C
+/// strings.
 pub trait IntoObjcClass {
     /// Converts this value into one resolved Objective-C class.
     fn into_objc_class(self) -> Result<ObjcClass, ObjcClassError>;
 }
 
 /// Converts one supported value into one [`ObjcSelector`].
+///
+/// Common inputs are existing [`ObjcSelector`] values and selector names as
+/// Rust or C strings.
 pub trait IntoObjcSelector {
     /// Converts this value into one Objective-C selector identifier.
     fn into_objc_selector(self) -> Result<ObjcSelector, ObjcSelectorError>;
 }
 
 /// Converts one supported value into one resolved [`ObjcMethod`].
+///
+/// This is a convenience wrapper around [`IntoObjcMethod::into_objc_method`].
 pub fn into_objc_method<T: IntoObjcMethod>(value: T) -> Result<ObjcMethod, ObjcMethodError> {
     value.into_objc_method()
 }
 
 /// Converts one supported value into one [`ObjcClass`].
+///
+/// This is a convenience wrapper around [`IntoObjcClass::into_objc_class`].
 pub fn into_objc_class<T: IntoObjcClass>(value: T) -> Result<ObjcClass, ObjcClassError> {
     value.into_objc_class()
 }
 
 /// Converts one supported value into one [`ObjcSelector`].
+///
+/// This is a convenience wrapper around [`IntoObjcSelector::into_objc_selector`].
 pub fn into_objc_selector<T: IntoObjcSelector>(
     value: T,
 ) -> Result<ObjcSelector, ObjcSelectorError> {

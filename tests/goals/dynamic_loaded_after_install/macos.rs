@@ -1,12 +1,15 @@
 //! macOS dynamic-library tests for images loaded after install.
 
-use retarget::{hook, install_registered_hooks};
+use retarget::{hook, install_registered_hooks, intercept::Event};
 
 #[path = "../macos_support.rs"]
 mod support;
 
+#[hook::observer(default = retarget::intercept::EveryHit)]
+fn observe_interception(_: Event) {}
+
 /// Declares the helper dylib export hook before the library is present.
-#[hook::observe(EveryHit)]
+#[hook::observe]
 #[hook::c(function = "hook_test_add_one")]
 unsafe extern "C" fn hook_test_add_one(value: i32) -> i32 {
     forward!() + 100

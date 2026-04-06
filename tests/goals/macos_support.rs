@@ -9,12 +9,12 @@ pub type HookTestCallAddOneFn = unsafe extern "C" fn(i32) -> i32;
 
 /// Returns the absolute path to the helper dylib compiled by the build script.
 pub fn test_dylib_path() -> &'static str {
-    env!("BLINDER_HOOK_TEST_DYLIB")
+    env!("RETARGET_HOOK_TEST_DYLIB")
 }
 
 /// Returns the absolute path to the helper caller dylib compiled by the build script.
 pub fn test_caller_dylib_path() -> &'static str {
-    env!("BLINDER_HOOK_TEST_CALLER_DYLIB")
+    env!("RETARGET_HOOK_TEST_CALLER_DYLIB")
 }
 
 /// Opens the helper dylib and returns the raw handle.

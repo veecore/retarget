@@ -1,4 +1,8 @@
 //! High-level Windows COM hook targets.
+//!
+//! These types model the COM-specific part of hook resolution: one live
+//! interface pointer, one vtable slot, and the resolved function that lives
+//! there.
 
 use crate::error::expect_utf8;
 use crate::function::{
@@ -10,6 +14,10 @@ use std::fmt;
 use std::ptr::NonNull;
 
 /// One resolved COM method target.
+///
+/// This is the resolved form of a COM hook target: the crate has already read
+/// one vtable slot from one live interface instance and turned it into a
+/// normal [`Function`] for replacement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComMethod {
     /// The method descriptor used to resolve this target.
@@ -30,6 +38,8 @@ impl ComMethod {
     }
 
     /// Replaces this resolved COM method target with one typed replacement.
+    ///
+    /// On success, the returned function pointer is the original vtable entry.
     ///
     /// # Safety
     ///
@@ -62,6 +72,12 @@ impl AsRef<Function> for ComMethod {
 /// This is the COM equivalent of one selector-like identity: it tells the
 /// crate which vtable slot to read from one live interface instance. Optional
 /// names exist only for diagnostics.
+///
+/// # Warnings
+///
+/// `slot_index` is a raw zero-based vtable slot index. `retarget` does not
+/// validate that it matches the intended interface method beyond checking that
+/// the slot can be read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComMethodId {
     /// Zero-based vtable slot index.
@@ -118,6 +134,9 @@ impl ComMethodId {
 
     /// Resolves this COM method descriptor on one live interface instance.
     ///
+    /// This is the step that turns one "slot on one interface instance" into a
+    /// concrete hookable function target.
+    ///
     /// # Safety
     ///
     /// `instance` must point to one live COM interface instance whose vtable is
@@ -163,6 +182,9 @@ impl fmt::Display for ComMethodId {
 }
 
 /// One live COM interface instance used to discover one concrete implementation.
+///
+/// This wrapper is non-owning. It does not call `AddRef` and it does not manage
+/// the lifetime of the underlying COM object for you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ComInstance {
     /// Raw non-null COM interface pointer.
@@ -289,6 +311,9 @@ impl Error for ComError {
 pub trait IntoComMethod {
     /// Converts this value into one resolved COM method target.
     ///
+    /// Common inputs are an existing [`ComMethod`] or a `(instance, method)`
+    /// pair where `method` can itself be one [`ComMethodId`] or slot index.
+    ///
     /// # Safety
     ///
     /// Any interface instance embedded in this value must point to one live
@@ -299,16 +324,24 @@ pub trait IntoComMethod {
 /// Converts one supported COM method-descriptor value into one [`ComMethodId`].
 pub trait IntoComMethodId {
     /// Converts this value into one COM method descriptor.
+    ///
+    /// Common inputs are a raw `usize` slot index or one prebuilt
+    /// [`ComMethodId`].
     fn into_com_method_id(self) -> Result<ComMethodId, ComError>;
 }
 
 /// Converts one supported COM interface value into one [`ComInstance`].
 pub trait IntoComInstance {
     /// Converts this value into one non-null COM interface instance wrapper.
+    ///
+    /// Common inputs are raw pointers, [`NonNull`] pointers, existing
+    /// [`ComInstance`] values, and `windows_core::Interface` values.
     fn into_com_instance(self) -> Result<ComInstance, ComError>;
 }
 
 /// Converts one supported COM method target into one resolved [`ComMethod`].
+///
+/// This is a convenience wrapper around [`IntoComMethod::into_com_method`].
 ///
 /// # Safety
 ///

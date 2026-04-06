@@ -1,4 +1,8 @@
 //! Opaque function, module, and symbol targets used by hook installation.
+//!
+//! These types are the core building blocks behind exported-function hooks.
+//! They are also useful directly when you want to resolve and replace symbols
+//! without going through the proc-macro surface.
 
 use crate::error::{InvalidName, expect_utf8, write_invalid_name};
 use crate::imp::function::{
@@ -17,6 +21,11 @@ mod private {
 }
 
 /// One typed function pointer that can be used as one hook target or replacement.
+///
+/// This trait is sealed to the plain function-pointer forms that `retarget`
+/// knows how to convert safely. It currently covers `extern "C"`,
+/// `extern "system"`, and Rust ABI function pointers up to the supported arity
+/// generated in this crate.
 pub trait FunctionPointer: private::Sealed + Copy {}
 
 macro_rules! impl_hook_function_signature {
@@ -54,6 +63,15 @@ impl_hook_function_signature!(A, B, C, D, E, F, G, H, I, J, K, L, M, O, P);
 impl_hook_function_signature!(A, B, C, D, E, F, G, H, I, J, K, L, M, O, P, Q);
 
 /// One resolved hookable function target.
+///
+/// A [`Function`] remembers three things together:
+///
+/// - the resolved address
+/// - the owning module used for diagnostics
+/// - the retained symbol name used for diagnostics and later lookups
+///
+/// Most users get one through [`into_function`] or from macro-generated hook
+/// code rather than constructing it manually.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     /// Resolved raw function pointer.
@@ -80,6 +98,9 @@ impl Function {
     /// The caller must ensure `T` matches the resolved function ABI and
     /// signature.
     ///
+    /// This is most useful when you are using `retarget` as a low-level
+    /// resolver rather than going through `#[hook::c]`.
+    ///
     /// # Safety
     ///
     /// `T` must exactly match the ABI and signature of the resolved function.
@@ -91,6 +112,9 @@ impl Function {
     ///
     /// The caller must ensure `T` matches the resolved function ABI and
     /// signature.
+    ///
+    /// On success, the returned function pointer is the original implementation
+    /// that was replaced.
     ///
     /// # Safety
     ///
@@ -169,6 +193,9 @@ impl Error for FunctionReplaceError {
 }
 
 /// One resolved module handle retained for lookup and diagnostics.
+///
+/// A [`Module`] lets you scope symbol lookups to one image instead of relying
+/// on process-global symbol resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Module {
     /// Resolved raw module handle.
@@ -184,6 +211,9 @@ impl Module {
     }
 
     /// Resolves one symbol within this module.
+    ///
+    /// This does not fall back to global resolution; it only searches this
+    /// specific module.
     pub fn resolve<S: IntoSymbol>(&self, symbol: S) -> Result<Function, FunctionError> {
         let symbol = symbol.into_symbol().map_err(FunctionError::from)?;
         symbol.resolve_in(self)
@@ -208,6 +238,9 @@ impl fmt::Display for Module {
 }
 
 /// One exported symbol name.
+///
+/// Symbols are pure identity values until you resolve them into a [`Function`].
+/// They can be resolved globally or against one or more modules.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Symbol(CString);
 
@@ -240,6 +273,13 @@ impl Symbol {
     }
 
     /// Resolves this symbol against one module list and then the process-global namespace.
+    ///
+    /// # Edge Cases
+    ///
+    /// If the symbol is not found in any provided module, this method falls
+    /// back to the process-global symbol space. That fallback is convenient,
+    /// but it also means "not found in these modules" is not the same as "hard
+    /// failure" here.
     pub fn resolve_in_modules(&self, modules: &[Module]) -> Result<Function, FunctionError> {
         for module in modules {
             if let Some(address) = resolve_symbol_in_module(self.name_c_str(), module.resolved()) {
@@ -523,34 +563,53 @@ impl From<SymbolError> for FunctionError {
 }
 
 /// Converts one supported function target into one [`Function`].
+///
+/// Common inputs include:
+///
+/// - an existing [`Function`]
+/// - a typed function pointer
+/// - a symbol name like `&str` or [`CString`]
+/// - a `(module, symbol)` pair
 pub trait IntoFunction {
     /// Converts this value into one resolved function pointer.
     fn into_function(self) -> Result<Function, FunctionError>;
 }
 
 /// Converts one supported module value into one [`Module`].
+///
+/// Common inputs include existing [`Module`] values and module names as Rust or
+/// C strings.
 pub trait IntoModule {
     /// Converts this value into one resolved module handle.
     fn into_module(self) -> Result<Module, ModuleError>;
 }
 
 /// Converts one supported symbol value into one [`Symbol`].
+///
+/// Common inputs include existing [`Symbol`] values and symbol names as Rust or
+/// C strings.
 pub trait IntoSymbol {
     /// Converts this value into one symbol name.
     fn into_symbol(self) -> Result<Symbol, SymbolError>;
 }
 
 /// Converts one supported target value into one [`Function`].
+///
+/// This is a convenience wrapper around [`IntoFunction::into_function`].
 pub fn into_function<T: IntoFunction>(value: T) -> Result<Function, FunctionError> {
     value.into_function()
 }
 
 /// Converts one supported module value into one [`Module`].
+///
+/// This is a convenience wrapper around [`IntoModule::into_module`].
 pub fn into_module<T: IntoModule>(value: T) -> Result<Module, ModuleError> {
     value.into_module()
 }
 
 /// Converts one supported symbol value into one [`Symbol`].
+///
+/// This is a convenience wrapper around [`IntoSymbol::into_symbol`].
 pub fn into_symbol<T: IntoSymbol>(value: T) -> Result<Symbol, SymbolError> {
     value.into_symbol()
 }

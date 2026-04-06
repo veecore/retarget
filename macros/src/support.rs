@@ -4,6 +4,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, format_ident, quote};
 use syn::{Expr, ExprLit, Ident, Lit, LitStr, Path, Result, Type};
 
+// Shared generated hook scaffold
+
 /// One normalized description of the generated items for a function-like hook.
 pub(crate) struct FunctionLikeHook {
     /// The original function or method item.
@@ -65,6 +67,9 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
     quote! {
         #input
 
+        // Normalize every hook body behind one concrete function-pointer alias.
+        // That keeps the generated storage and `forward!()` plumbing identical
+        // across exported functions, COM methods, and Objective-C methods.
         #[allow(non_camel_case_types)]
         type #fn_ty_ident = #unsafety #abi fn(#(#arg_tys),*) -> #ret_ty;
 
@@ -77,6 +82,8 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
         static #original_lock_ident: std::sync::OnceLock<#fn_ty_ident> =
             std::sync::OnceLock::new();
 
+        // First-hit interception bookkeeping is also local to each generated
+        // hook; there is no shared observer runtime coordinating this.
         #[allow(non_upper_case_globals)]
         static #intercept_once_ident: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
@@ -98,6 +105,8 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
 
         #extra_items
 
+        // Installation stays global through the distributed slice, but each
+        // hook contributes exactly one tiny installer function.
         #[allow(non_upper_case_globals)]
         #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::HOOKS)]
         static #hook_def_ident: ::retarget::__macro_support::HookDef =
@@ -106,6 +115,8 @@ pub(crate) fn emit_function_like_hook(hook: FunctionLikeHook) -> TokenStream2 {
             };
     }
 }
+
+// Shared validation and naming helpers
 
 /// Requires one macro argument to be present.
 pub(crate) fn require_arg<T>(value: Option<T>, span: &impl ToTokens, message: &str) -> Result<T> {
@@ -134,80 +145,6 @@ pub(crate) fn interception_mode_tokens(mode: &Path, ident: &Ident) -> Result<Tok
             ),
         )),
     }
-}
-
-/// Emits one optional per-hook interception override item.
-pub(crate) fn emit_interception_override(
-    def_ident: &Ident,
-    hook_id: &Expr,
-    mode: Option<&Path>,
-    ident: &Ident,
-) -> Result<TokenStream2> {
-    let Some(mode) = mode else {
-        return Ok(TokenStream2::new());
-    };
-    let mode = interception_mode_tokens(mode, ident)?;
-    Ok(quote! {
-        #[cfg(feature = "registry")]
-        #[allow(non_upper_case_globals)]
-        #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::INTERCEPTION_OVERRIDES)]
-        static #def_ident: ::retarget::__macro_support::InterceptionOverrideDef =
-            ::retarget::__macro_support::InterceptionOverrideDef {
-                hook_id: #hook_id,
-                mode: #mode,
-            };
-    })
-}
-
-/// Emits one optional per-hook typed-signal registration item.
-pub(crate) fn emit_interception_signal(
-    def_ident: &Ident,
-    hook_id: &Expr,
-    value: Option<&Expr>,
-) -> Result<TokenStream2> {
-    let Some(value) = value else {
-        return Ok(TokenStream2::new());
-    };
-    let type_id_ident = format_ident!("__blinder_interception_signal_type_{}", def_ident);
-    let type_name_ident = format_ident!("__blinder_interception_signal_name_{}", def_ident);
-    let assert_ident = format_ident!("__BLINDER_INTERCEPTION_SIGNAL_ASSERT_{}", def_ident);
-
-    Ok(quote! {
-        #[cfg(feature = "registry")]
-        #[allow(non_snake_case)]
-        fn #type_id_ident() -> ::std::any::TypeId {
-            fn __retarget_signal_type_id<T: 'static>(_: fn() -> T) -> ::std::any::TypeId {
-                ::std::any::TypeId::of::<T>()
-            }
-            __retarget_signal_type_id(|| #value)
-        }
-
-        #[cfg(feature = "registry")]
-        #[allow(non_snake_case)]
-        fn #type_name_ident() -> &'static str {
-            fn __retarget_signal_type_name<T: 'static>(_: fn() -> T) -> &'static str {
-                ::std::any::type_name::<T>()
-            }
-            __retarget_signal_type_name(|| #value)
-        }
-
-        #[cfg(feature = "registry")]
-        #[allow(non_upper_case_globals)]
-        const #assert_ident: fn() = || {
-            fn __retarget_assert_signal<T: Clone + 'static>(_: fn() -> T) {}
-            __retarget_assert_signal(|| #value);
-        };
-
-        #[cfg(feature = "registry")]
-        #[allow(non_upper_case_globals)]
-        #[::retarget::__macro_support::distributed_slice(::retarget::__macro_support::INTERCEPTION_SIGNALS)]
-        static #def_ident: ::retarget::__macro_support::InterceptionSignalDef =
-            ::retarget::__macro_support::InterceptionSignalDef {
-                hook_id: #hook_id,
-                type_id: #type_id_ident,
-                type_name: #type_name_ident,
-            };
-    })
 }
 
 /// Builds the stable hook identifier used by free-function hooks.
@@ -240,6 +177,8 @@ pub(crate) fn derive_function_hook_name_expr(
     function: &Expr,
     span: &impl ToTokens,
 ) -> Result<Expr> {
+    // Prefer the actual target symbol when it is available literally so error
+    // messages talk about the hooked symbol instead of the Rust helper name.
     if let Some(symbol) = expr_lit_str(function) {
         return Ok(syn::parse_quote!(#symbol));
     }
@@ -304,20 +243,12 @@ pub(crate) fn derive_com_field_ident(ident: &Ident) -> Ident {
     format_ident!("{}", output)
 }
 
-/// Wraps one optional image expression as one generated `Option<Module>` expression.
-pub(crate) fn optional_image_expr(image: Option<Expr>) -> Expr {
-    match image {
-        Some(image) => syn::parse_quote! {
-            Some(::retarget::__macro_support::into_module(#image).expect("hook module must not contain NUL"))
-        },
-        None => {
-            syn::parse_quote!(::std::option::Option::<::retarget::__macro_support::Module>::None)
-        }
-    }
-}
+// Generated target conversion helpers
 
 /// Builds the module slice used for install-time or resolve-time image lists.
 pub(crate) fn module_slice_expr(images: &[Expr], fallback_image: Option<&Expr>) -> TokenStream2 {
+    // COM hooks can probe one set of images and install against another. This
+    // helper keeps that "slice literal or empty slice" codegen centralized.
     if !images.is_empty() {
         quote! {
             &[#(::retarget::__macro_support::into_module(#images).expect("hook module must not contain NUL")),*]
@@ -346,6 +277,9 @@ pub(crate) fn try_function_expr(function: Expr) -> Expr {
 
 /// Builds the generated Objective-C method resolution expression.
 pub(crate) fn required_objc_method_expr(kind: Expr, class: Expr, selector: Expr) -> Expr {
+    // This stays expression-shaped so the caller can splice it directly into
+    // generated install code and still reuse the public conversion helpers for
+    // diagnostics.
     syn::parse_quote!({
         match ::retarget::__macro_support::into_objc_class(#class) {
             Ok(class) => match ::retarget::__macro_support::into_objc_selector(#selector) {
@@ -363,6 +297,8 @@ pub(crate) fn required_objc_method_expr(kind: Expr, class: Expr, selector: Expr)
         }
     })
 }
+
+// Low-level syntax helpers
 
 /// Checks whether one attribute path ends with the requested segment.
 pub(crate) fn attr_path_ends_with(attr: &syn::Attribute, expected: &str) -> bool {

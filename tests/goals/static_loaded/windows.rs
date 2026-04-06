@@ -36,6 +36,7 @@ unsafe extern "C" {
 }
 
 /// Detoured build-linked helper function from the C fixture.
+#[hook::observe]
 #[hook::c(function = "hook_test_add_one")]
 unsafe extern "C" fn hooked_linked_hook_test_add_one(value: i32) -> i32 {
     forward!() + 100
@@ -47,6 +48,7 @@ struct StreamHooks;
 #[hook::com_impl(interface = IStream, instance = test_stream_ptr())]
 impl StreamHooks {
     /// Detoured real system COM method `IStream::SetSize`.
+    #[hook::observe]
     #[hook::com(field = SetSize)]
     unsafe extern "system" fn set_size(this: *mut c_void, libnewsize: u64) -> HRESULT {
         let _ = (this, libnewsize);
@@ -54,6 +56,7 @@ impl StreamHooks {
     }
 
     /// Detoured real system COM method `IStream::Commit`.
+    #[hook::observe]
     unsafe extern "system" fn commit(this: *mut c_void, grfcommitflags: u32) -> HRESULT {
         let _ = (this, grfcommitflags);
         HRESULT(0x80004005u32 as i32)

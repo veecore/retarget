@@ -9,13 +9,13 @@ pub type HookTestCallAddOneFn = unsafe extern "system" fn(i32) -> i32;
 
 /// Returns the absolute path to the helper target DLL compiled by the build script.
 pub fn test_target_dll_path() -> &'static str {
-    option_env!("BLINDER_HOOK_TEST_TARGET_DLL")
+    option_env!("RETARGET_HOOK_TEST_TARGET_DLL")
         .expect("Windows dynamic test target DLL path is only available on a Windows host build")
 }
 
 /// Returns the absolute path to the helper caller DLL compiled by the build script.
 pub fn test_caller_dll_path() -> &'static str {
-    option_env!("BLINDER_HOOK_TEST_CALLER_DLL")
+    option_env!("RETARGET_HOOK_TEST_CALLER_DLL")
         .expect("Windows dynamic test caller DLL path is only available on a Windows host build")
 }
 
