@@ -1,6 +1,7 @@
 //! Objective-C resolution and method replacement helpers.
 
 use libc::c_void;
+use objc2::ffi;
 use objc2::runtime::{AnyClass, Imp, Method, Sel};
 use std::ffi::CStr;
 use std::ptr::NonNull;
@@ -18,12 +19,31 @@ pub(crate) fn resolve_method(
 ) -> Option<NonNull<c_void>> {
     let class = unsafe { &*class.as_ptr().cast::<AnyClass>() };
     let selector = Sel::register(selector);
-    let method = if is_instance {
+    let owner = if is_instance {
+        class
+    } else {
+        class.metaclass()
+    };
+    let resolved = if is_instance {
         class.instance_method(selector)
     } else {
         class.class_method(selector)
     }?;
-    Some(NonNull::from(method).cast())
+
+    if has_direct_method(owner, selector) {
+        return Some(NonNull::from(resolved).cast());
+    }
+
+    unsafe {
+        localize_inherited_method(owner, selector, resolved);
+    }
+
+    let localized = if is_instance {
+        class.instance_method(selector)
+    } else {
+        class.class_method(selector)
+    }?;
+    Some(NonNull::from(localized).cast())
 }
 
 /// Replaces one Objective-C method implementation and returns the previous implementation.
@@ -42,4 +62,24 @@ pub(crate) fn replace_method(
 /// Returns one typed Objective-C method reference from one raw method pointer.
 fn resolved_method(method: NonNull<c_void>) -> &'static Method {
     unsafe { &*method.as_ptr().cast::<Method>() }
+}
+
+/// Returns whether the given class object defines the selector directly.
+fn has_direct_method(class: &AnyClass, selector: Sel) -> bool {
+    class
+        .instance_methods()
+        .into_iter()
+        .any(|method| method.name() == selector)
+}
+
+/// Copies one inherited method onto the concrete class object so later replacement
+/// stays scoped to that class instead of mutating the shared ancestor slot.
+unsafe fn localize_inherited_method(class: &AnyClass, selector: Sel, inherited: &Method) {
+    let types = unsafe { ffi::method_getTypeEncoding(inherited) };
+    if types.is_null() {
+        return;
+    }
+
+    let class = (class as *const AnyClass).cast_mut();
+    let _ = unsafe { ffi::class_addMethod(class, selector, inherited.implementation(), types) };
 }

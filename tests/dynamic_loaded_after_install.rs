@@ -1,11 +1,22 @@
-//! Integration tests for dynamic libraries loaded after hook install.
+//! Integration tests for module-scoped targets loaded after hook install.
 
-#![allow(unreachable_code)]
+mod support;
 
-#[cfg(target_os = "macos")]
-#[path = "goals/dynamic_loaded_after_install/macos.rs"]
-mod macos;
+use retarget::{hook, install_registered_hooks};
 
-#[cfg(target_os = "windows")]
-#[path = "goals/dynamic_loaded_after_install/windows.rs"]
-mod windows;
+#[hook::c((support::test_dylib_path(), "hook_test_add_one"))]
+unsafe extern "C" fn hook_test_add_one(value: i32) -> i32 {
+    forward!() + 100
+}
+
+#[test]
+fn module_scoped_symbol_auto_primes_loaded_after_install_target() {
+    install_registered_hooks()
+        .expect("expected module-scoped hook install to auto-prime the target image");
+
+    let observed = support::call_test_caller_add_one(2);
+    assert_eq!(observed, 103);
+
+    let observed = support::call_test_target_add_one(2);
+    assert_eq!(observed, 103);
+}
