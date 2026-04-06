@@ -57,8 +57,11 @@ macro_rules! define_hook_args {
 
 #[derive(Default)]
 pub(crate) struct HookArgs {
+    pub(crate) original: Option<Ident>,
     pub(crate) name: Option<Expr>,
     pub(crate) function: Option<Expr>,
+    pub(crate) image: Option<Expr>,
+    pub(crate) symbol: Option<Expr>,
     pub(crate) optional: Option<Expr>,
     pub(crate) fallback: Option<Expr>,
 }
@@ -214,8 +217,24 @@ fn parse_named_hook_arg(args: &mut HookArgs, assign: ExprAssign) -> Result<()> {
     let value = *assign.right;
 
     match name.as_str() {
+        "original" => {
+            let ident = match value {
+                Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+                    path.path.segments[0].ident.clone()
+                }
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "`original` must be an identifier",
+                    ));
+                }
+            };
+            set_ident_slot(&mut args.original, ident, &assign.left, &name)
+        }
         "name" => set_expr_slot(&mut args.name, value, &assign.left, &name),
         "function" => set_expr_slot(&mut args.function, value, &assign.left, &name),
+        "image" => set_expr_slot(&mut args.image, value, &assign.left, &name),
+        "symbol" => set_expr_slot(&mut args.symbol, value, &assign.left, &name),
         "optional" => set_expr_slot(&mut args.optional, value, &assign.left, &name),
         "fallback" => set_expr_slot(&mut args.fallback, value, &assign.left, &name),
         _ => Err(syn::Error::new_spanned(
@@ -304,6 +323,17 @@ fn set_expr_slot(slot: &mut Option<Expr>, value: Expr, span: &Expr, name: &str) 
 
 /// Stores one path in one optional slot, reporting duplicates consistently.
 fn set_path_slot(slot: &mut Option<Path>, value: Path, span: &Expr, name: &str) -> Result<()> {
+    if slot.replace(value).is_some() {
+        return Err(syn::Error::new_spanned(
+            span,
+            format!("duplicate `{name}` argument"),
+        ));
+    }
+    Ok(())
+}
+
+/// Stores one identifier in one optional slot, reporting duplicates consistently.
+fn set_ident_slot(slot: &mut Option<Ident>, value: Ident, span: &Expr, name: &str) -> Result<()> {
     if slot.replace(value).is_some() {
         return Err(syn::Error::new_spanned(
             span,

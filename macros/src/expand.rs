@@ -4,10 +4,10 @@ use crate::args::{HookArgs, HookComArgs, HookComImplArgs, HookObjcArgs, HookObjc
 use crate::callable::HookCallableMeta;
 use crate::observe::{inject_observe_dispatch, take_observe_args};
 use crate::support::{
-    FunctionLikeHook, attr_path_ends_with, default_function_target_expr, derive_c_hook_name_expr,
-    derive_com_field_ident, derive_com_method_name_expr, derive_function_hook_name_expr,
-    derive_hook_id_expr, derive_impl_hook_id_expr, derive_objc_hook_name_expr,
-    emit_function_like_hook, module_slice_expr, require_arg, required_image_expr,
+    FunctionLikeHook, attr_path_ends_with, derive_c_hook_name_expr, derive_com_field_ident,
+    derive_com_method_name_expr, derive_function_hook_name_expr, derive_hook_id_expr,
+    derive_impl_hook_id_expr, derive_objc_hook_name_expr, emit_function_like_hook,
+    module_slice_expr, normalize_function_target_expr, require_arg, required_image_expr,
     required_objc_method_expr, required_symbol_expr, try_function_expr, type_last_ident,
 };
 use proc_macro2::TokenStream as TokenStream2;
@@ -24,9 +24,9 @@ pub(crate) fn expand_hook(args: HookArgs, mut function: ItemFn) -> Result<TokenS
     let observe = take_observe_args(&mut function.attrs)?;
     let mut meta = HookCallableMeta::parse_function(function)?;
 
-    let function_target = args
-        .function
-        .unwrap_or_else(|| default_function_target_expr(&meta.ident));
+    let original_accessor = args.original;
+    let function_target =
+        normalize_function_target_expr(args.function, args.image, args.symbol, &meta.ident)?;
     let name = if let Some(name) = args.name {
         name
     } else {
@@ -58,6 +58,14 @@ pub(crate) fn expand_hook(args: HookArgs, mut function: ItemFn) -> Result<TokenS
     let install_ident = format_ident!("__retarget_c_hook_install_{}", fn_ident);
     let hook_def_ident = format_ident!("__RETARGET_C_HOOK_DEF_{}", fn_ident);
     let replacement_value = quote!(#fn_ident as #fn_ty_ident);
+    let accessor_item = original_accessor.map(|accessor_ident| {
+        quote! {
+            #[allow(dead_code)]
+            fn #accessor_ident() -> Option<#fn_ty_ident> {
+                #original_lock_ident.get().copied()
+            }
+        }
+    });
 
     // Rewrite the user body in two passes: first add `forward!()`, then splice
     // in any requested observation at the function head.
@@ -116,7 +124,7 @@ pub(crate) fn expand_hook(args: HookArgs, mut function: ItemFn) -> Result<TokenS
         abi,
         fallback,
         install_body,
-        extra_items: TokenStream2::new(),
+        extra_items: accessor_item.unwrap_or_default(),
     }))
 }
 

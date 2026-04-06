@@ -199,6 +199,26 @@ pub(crate) fn default_function_target_expr(ident: &Ident) -> Expr {
     syn::parse_quote!(#symbol)
 }
 
+/// Normalizes the public `#[hook::function(...)]` target spellings into one expression.
+pub(crate) fn normalize_function_target_expr(
+    function: Option<Expr>,
+    image: Option<Expr>,
+    symbol: Option<Expr>,
+    ident: &Ident,
+) -> Result<Expr> {
+    match (function, image, symbol) {
+        (Some(function), None, None) => Ok(function),
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(syn::Error::new_spanned(
+            ident,
+            "`function` cannot be combined with `image` or `symbol`",
+        )),
+        (None, Some(image), Some(symbol)) => Ok(syn::parse_quote!((#image, #symbol))),
+        (None, Some(_), None) => Err(syn::Error::new_spanned(ident, "`image` requires `symbol`")),
+        (None, None, Some(symbol)) => Ok(symbol),
+        (None, None, None) => Ok(default_function_target_expr(ident)),
+    }
+}
+
 /// Derives a human-readable Objective-C hook name from class and selector expressions.
 pub(crate) fn derive_objc_hook_name_expr(
     class: &Expr,

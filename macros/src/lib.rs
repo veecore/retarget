@@ -22,6 +22,7 @@ use crate::expand::{
 };
 use crate::observe::{expand_hook_observe, expand_hook_observer};
 use proc_macro::TokenStream;
+use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::{ItemFn, ItemImpl, Result, parse_macro_input};
 
@@ -68,6 +69,19 @@ fn expand_impl_attr<A>(
     }
 }
 
+/// Appends one extra named argument to one attribute token stream.
+fn append_named_arg(mut attr: TokenStream2, extra: TokenStream2) -> TokenStream2 {
+    let needs_comma =
+        attr.clone().into_iter().last().is_some_and(
+            |token| !matches!(token, TokenTree::Punct(punct) if punct.as_char() == ','),
+        );
+    if needs_comma {
+        attr.extend(quote!(,));
+    }
+    attr.extend(extra);
+    attr
+}
+
 // Public proc-macro entrypoints
 
 #[proc_macro_attribute]
@@ -79,8 +93,10 @@ fn expand_impl_attr<A>(
 /// - `#[hook::c]` to use the Rust function name as the symbol name
 /// - `#[hook::c("symbol")]` for one explicit process-global symbol
 /// - `#[hook::c(("module", "symbol"))]` for one module-scoped symbol
-/// - `#[hook::c(function = ..., optional = ..., fallback = ...)]` for the
-///   fully named form
+/// - `#[hook::c(symbol = "name")]` or `#[hook::c(image = SomeModule, symbol = "name")]`
+///   for a more self-describing named target
+/// - `#[hook::c(function = ..., original = accessor, optional = ..., fallback = ...)]`
+///   for the fully named form
 ///
 /// # Warnings
 ///
@@ -96,13 +112,10 @@ pub fn hook_c(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is the same as `#[hook::objc(..., kind = Class)]`, but with the method
 /// kind fixed by the attribute itself.
 pub fn hook_objc_class(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut combined = proc_macro2::TokenStream::from(attr);
-    if !combined.is_empty() {
-        combined.extend(quote!(,));
-    }
-    combined.extend(quote!(
-        kind = ::retarget::__macro_support::ObjcMethodKind::Class
-    ));
+    let combined = append_named_arg(
+        TokenStream2::from(attr),
+        quote!(kind = retarget::__macro_support::ObjcMethodKind::Class),
+    );
     expand_fn_attr(
         combined.into(),
         item,
@@ -117,13 +130,10 @@ pub fn hook_objc_class(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is the same as `#[hook::objc(..., kind = Instance)]`, but with the
 /// method kind fixed by the attribute itself.
 pub fn hook_objc_instance(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut combined = proc_macro2::TokenStream::from(attr);
-    if !combined.is_empty() {
-        combined.extend(quote!(,));
-    }
-    combined.extend(quote!(
-        kind = ::retarget::__macro_support::ObjcMethodKind::Instance
-    ));
+    let combined = append_named_arg(
+        TokenStream2::from(attr),
+        quote!(kind = retarget::__macro_support::ObjcMethodKind::Instance),
+    );
     expand_fn_attr(
         combined.into(),
         item,
