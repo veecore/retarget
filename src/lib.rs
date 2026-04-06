@@ -204,10 +204,11 @@ pub use objc::{
     into_objc_method, into_objc_selector,
 };
 
-/// Public interception types and mode aliases.
 #[cfg(feature = "registry")]
 pub mod intercept {
-    //! Types used by `#[hook::observer]` and `#[hook::observe]`.
+    //! Public interception types and mode aliases.
+    //!
+    //! These are the types used by `#[hook::observer]` and `#[hook::observe]`.
     //!
     //! `retarget` keeps observation deliberately small:
     //!
@@ -245,9 +246,10 @@ pub fn install_registered_hooks() -> std::io::Result<()> {
     __macro_support::install_registered_hooks()
 }
 
-/// User-facing hook declaration macros.
 pub mod hook {
-    //! Declarative hook macros.
+    //! User-facing hook declaration macros.
+    //!
+    //! These are the supported declarative hook macros.
     //!
     //! These macros are the supported authoring surface for generated hooks.
     //! If docs or IDE completion show `retarget::__macro_support` or generated
@@ -267,10 +269,11 @@ pub mod hook {
     /// Hook interception observer registration.
     pub use retarget_macros::hook_observer as observer;
 
-    /// Objective-C hook declarations.
     #[cfg(target_os = "macos")]
     pub mod objc {
-        //! Objective-C hook macros.
+        //! Objective-C hook declarations.
+        //!
+        //! These macros declare Objective-C hooks.
         //!
         //! Use `class` for class methods, `instance` for instance methods, and
         //! `methods` to group related hooks in one inherent impl block.

@@ -8,9 +8,7 @@ use crate::error::expect_utf8;
 use crate::function::{
     Function, FunctionError, FunctionPointer, FunctionReplaceError, Symbol, into_function,
 };
-use std::error::Error;
 use std::ffi::{CStr, CString, c_void};
-use std::fmt;
 use std::ptr::NonNull;
 
 /// One resolved COM method target.
@@ -53,20 +51,6 @@ impl ComMethod {
     }
 }
 
-impl fmt::Display for ComMethod {
-    /// Formats one resolved COM method target for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.id.fmt(f)
-    }
-}
-
-impl AsRef<Function> for ComMethod {
-    /// Borrows the resolved function target.
-    fn as_ref(&self) -> &Function {
-        self.function()
-    }
-}
-
 /// One COM method descriptor.
 ///
 /// This is the COM equivalent of one selector-like identity: it tells the
@@ -78,7 +62,10 @@ impl AsRef<Function> for ComMethod {
 /// `slot_index` is a raw zero-based vtable slot index. `retarget` does not
 /// validate that it matches the intended interface method beyond checking that
 /// the slot can be read.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing use only the slot index. Optional names are retained
+/// for diagnostics and do not participate.
+#[derive(Debug, Clone)]
 pub struct ComMethodId {
     /// Zero-based vtable slot index.
     slot_index: usize,
@@ -160,24 +147,6 @@ impl ComMethodId {
             id: self.clone(),
             function,
         })
-    }
-}
-
-impl fmt::Display for ComMethodId {
-    /// Formats one COM method descriptor for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.interface_name(), self.method_name()) {
-            (Some(interface_name), Some(method_name)) => {
-                write!(f, "{}::{}", interface_name, method_name)
-            }
-            (None, Some(method_name)) => {
-                write!(f, "slot {} ('{}')", self.slot_index, method_name)
-            }
-            (Some(interface_name), None) => {
-                write!(f, "{}::slot({})", interface_name, self.slot_index)
-            }
-            (None, None) => write!(f, "slot {}", self.slot_index),
-        }
     }
 }
 
@@ -278,35 +247,6 @@ impl ComError {
     }
 }
 
-impl fmt::Display for ComError {
-    /// Formats one COM target construction failure for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            ComErrorImpl::NullInstance => {
-                f.write_str("null COM interface pointers cannot be resolved")
-            }
-            ComErrorImpl::MissingMethod { method } => write!(
-                f,
-                "COM method {} could not be resolved on the provided interface instance",
-                method
-            ),
-            ComErrorImpl::Function { method, source } => {
-                write!(f, "failed to resolve COM method {}: {}", method, source)
-            }
-        }
-    }
-}
-
-impl Error for ComError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            ComErrorImpl::NullInstance | ComErrorImpl::MissingMethod { .. } => None,
-            ComErrorImpl::Function { source, .. } => Some(source),
-        }
-    }
-}
-
 /// Converts one supported COM method target into one resolved [`ComMethod`].
 pub trait IntoComMethod {
     /// Converts this value into one resolved COM method target.
@@ -359,6 +299,89 @@ pub fn into_com_method_id<T: IntoComMethodId>(value: T) -> Result<ComMethodId, C
 /// Converts one supported COM interface value into one [`ComInstance`].
 pub fn into_com_instance<T: IntoComInstance>(value: T) -> Result<ComInstance, ComError> {
     value.into_com_instance()
+}
+
+/// Standard-library trait impls used by the public COM target and error models.
+mod std_impls {
+    use super::*;
+    use std::error::Error;
+    use std::fmt;
+    use std::hash::{Hash, Hasher};
+
+    impl fmt::Display for ComMethod {
+        /// Formats one resolved COM method target for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.id.fmt(f)
+        }
+    }
+
+    impl AsRef<Function> for ComMethod {
+        /// Borrows the resolved function target.
+        fn as_ref(&self) -> &Function {
+            self.function()
+        }
+    }
+
+    impl PartialEq for ComMethodId {
+        fn eq(&self, other: &Self) -> bool {
+            self.slot_index == other.slot_index
+        }
+    }
+
+    impl Eq for ComMethodId {}
+
+    impl Hash for ComMethodId {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.slot_index.hash(state);
+        }
+    }
+
+    impl fmt::Display for ComMethodId {
+        /// Formats one COM method descriptor for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match (self.interface_name(), self.method_name()) {
+                (Some(interface_name), Some(method_name)) => {
+                    write!(f, "{}::{}", interface_name, method_name)
+                }
+                (None, Some(method_name)) => {
+                    write!(f, "slot {} ('{}')", self.slot_index, method_name)
+                }
+                (Some(interface_name), None) => {
+                    write!(f, "{}::slot({})", interface_name, self.slot_index)
+                }
+                (None, None) => write!(f, "slot {}", self.slot_index),
+            }
+        }
+    }
+
+    impl fmt::Display for ComError {
+        /// Formats one COM target construction failure for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                ComErrorImpl::NullInstance => {
+                    f.write_str("null COM interface pointers cannot be resolved")
+                }
+                ComErrorImpl::MissingMethod { method } => write!(
+                    f,
+                    "COM method {} could not be resolved on the provided interface instance",
+                    method
+                ),
+                ComErrorImpl::Function { method, source } => {
+                    write!(f, "failed to resolve COM method {}: {}", method, source)
+                }
+            }
+        }
+    }
+
+    impl Error for ComError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                ComErrorImpl::NullInstance | ComErrorImpl::MissingMethod { .. } => None,
+                ComErrorImpl::Function { source, .. } => Some(source),
+            }
+        }
+    }
 }
 
 /// Conversion trait impls for high-level COM targets.
@@ -460,5 +483,67 @@ mod impls {
         fn into_com_instance(self) -> Result<ComInstance, ComError> {
             self.as_raw().into_com_instance()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ComMethod, ComMethodId};
+    use crate::function::{Function, Module, Symbol};
+    use std::collections::HashSet;
+    use std::ffi::{CString, c_void};
+    use std::ptr::NonNull;
+
+    fn fake_ptr(value: usize) -> NonNull<c_void> {
+        NonNull::new(value as *mut c_void).expect("non-null test pointer")
+    }
+
+    #[test]
+    fn method_ids_ignore_diagnostic_names_in_equality_and_hashing() {
+        let unnamed = ComMethodId::new(3);
+        let named = ComMethodId::named(
+            3,
+            CString::new("IUnknown").expect("valid c string"),
+            CString::new("QueryInterface").expect("valid c string"),
+        );
+
+        assert_eq!(unnamed, named);
+        assert_eq!(HashSet::from([unnamed, named]).len(), 1);
+    }
+
+    #[test]
+    fn resolved_methods_ignore_diagnostic_names_in_equality() {
+        let first = ComMethod {
+            id: ComMethodId::new(7),
+            function: unsafe {
+                Function::from_resolved_parts(
+                    fake_ptr(0x1111),
+                    Module::from_resolved_parts(
+                        fake_ptr(0x2222),
+                        CString::new("first.dll").expect("valid c string"),
+                    ),
+                    Symbol::from_cstring(CString::new("FirstName").expect("valid c string")),
+                )
+            },
+        };
+        let second = ComMethod {
+            id: ComMethodId::named(
+                7,
+                CString::new("IMyInterface").expect("valid c string"),
+                CString::new("RenamedMethod").expect("valid c string"),
+            ),
+            function: unsafe {
+                Function::from_resolved_parts(
+                    fake_ptr(0x1111),
+                    Module::from_resolved_parts(
+                        fake_ptr(0x2222),
+                        CString::new("second.dll").expect("valid c string"),
+                    ),
+                    Symbol::from_cstring(CString::new("SecondName").expect("valid c string")),
+                )
+            },
+        };
+
+        assert_eq!(first, second);
     }
 }

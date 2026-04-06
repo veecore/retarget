@@ -9,9 +9,7 @@ use crate::imp::function::{
     loaded_module_by_name, module_name_from_handle, prime_module_by_name, replace_function,
     resolve_function_address, resolve_symbol_global, resolve_symbol_in_module,
 };
-use std::error::Error;
 use std::ffi::{CStr, CString, NulError, c_void};
-use std::fmt;
 use std::io;
 use std::ptr::NonNull;
 
@@ -72,7 +70,10 @@ impl_hook_function_signature!(A, B, C, D, E, F, G, H, I, J, K, L, M, O, P, Q);
 ///
 /// Most users get one through [`into_function`] or from macro-generated hook
 /// code rather than constructing it manually.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing use the resolved function address only. The retained
+/// module and symbol are diagnostic labels and do not participate.
+#[derive(Debug, Clone)]
 pub struct Function {
     /// Resolved raw function pointer.
     resolved: NonNull<c_void>,
@@ -130,7 +131,7 @@ impl Function {
     }
 
     /// Builds one already resolved function target from typed parts.
-    pub(crate) fn from_resolved_parts(
+    pub(crate) unsafe fn from_resolved_parts(
         resolved: NonNull<c_void>,
         module: Module,
         symbol: Symbol,
@@ -151,13 +152,6 @@ impl Function {
     }
 }
 
-impl fmt::Display for Function {
-    /// Formats one resolved function target for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "'{}' in module '{}'", self.symbol, self.module)
-    }
-}
-
 /// One typed function-replacement failure.
 #[derive(Debug)]
 pub struct FunctionReplaceError {
@@ -174,29 +168,14 @@ impl FunctionReplaceError {
     }
 }
 
-impl fmt::Display for FunctionReplaceError {
-    /// Formats one function-replacement error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to replace function {}: {}",
-            self.target, self.source
-        )
-    }
-}
-
-impl Error for FunctionReplaceError {
-    /// Returns the underlying source error.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
 /// One resolved module handle retained for lookup and diagnostics.
 ///
 /// A [`Module`] lets you scope symbol lookups to one image instead of relying
 /// on process-global symbol resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing use the resolved module handle only. The retained
+/// module name is diagnostic and does not participate.
+#[derive(Debug, Clone)]
 pub struct Module {
     /// Resolved raw module handle.
     resolved: NonNull<c_void>,
@@ -225,15 +204,8 @@ impl Module {
     }
 
     /// Builds one already resolved module from one handle and retained name.
-    pub(crate) fn from_resolved_parts(resolved: NonNull<c_void>, name: CString) -> Self {
+    pub(crate) unsafe fn from_resolved_parts(resolved: NonNull<c_void>, name: CString) -> Self {
         Self { resolved, name }
-    }
-}
-
-impl fmt::Display for Module {
-    /// Formats one resolved module name for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 
@@ -254,22 +226,20 @@ impl Symbol {
     pub fn resolve(&self) -> Result<Function, FunctionError> {
         let resolved = resolve_symbol_global(self.name_c_str())
             .ok_or_else(|| FunctionError::function_not_found(None, self.clone()))?;
-        Ok(Function::from_resolved_parts(
-            resolved.symbol,
-            Module::from_resolved_parts(resolved.module, resolved.module_name),
-            self.clone(),
-        ))
+        Ok(unsafe {
+            Function::from_resolved_parts(
+                resolved.symbol,
+                Module::from_resolved_parts(resolved.module, resolved.module_name),
+                self.clone(),
+            )
+        })
     }
 
     /// Resolves this symbol inside one specific module.
     pub fn resolve_in(&self, module: &Module) -> Result<Function, FunctionError> {
         let resolved = resolve_symbol_in_module(self.name_c_str(), module.resolved())
             .ok_or_else(|| FunctionError::function_not_found(Some(module.clone()), self.clone()))?;
-        Ok(Function::from_resolved_parts(
-            resolved,
-            module.clone(),
-            self.clone(),
-        ))
+        Ok(unsafe { Function::from_resolved_parts(resolved, module.clone(), self.clone()) })
     }
 
     /// Resolves this symbol against one module list and then the process-global namespace.
@@ -283,11 +253,9 @@ impl Symbol {
     pub fn resolve_in_modules(&self, modules: &[Module]) -> Result<Function, FunctionError> {
         for module in modules {
             if let Some(address) = resolve_symbol_in_module(self.name_c_str(), module.resolved()) {
-                return Ok(Function::from_resolved_parts(
-                    address,
-                    module.clone(),
-                    self.clone(),
-                ));
+                return Ok(unsafe {
+                    Function::from_resolved_parts(address, module.clone(), self.clone())
+                });
             }
         }
 
@@ -302,13 +270,6 @@ impl Symbol {
     /// Builds one symbol from one already validated C string.
     pub(crate) fn from_cstring(value: CString) -> Self {
         Self(value)
-    }
-}
-
-impl fmt::Display for Symbol {
-    /// Formats one symbol identity for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 
@@ -386,40 +347,6 @@ impl ModuleError {
     }
 }
 
-impl fmt::Display for ModuleError {
-    /// Formats one module-target conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            ModuleErrorImpl::InvalidName { input } => write_invalid_name(f, "module", input),
-            ModuleErrorImpl::NotFound { name } => write!(
-                f,
-                "module '{}' is not loaded in the current process",
-                expect_utf8(name)
-            ),
-            ModuleErrorImpl::LoadFailed { name, source } => {
-                write!(f, "failed to load module '{}': {source}", expect_utf8(name))
-            }
-            ModuleErrorImpl::Unavailable { source } => {
-                write!(
-                    f,
-                    "failed to recover module information from the provided value: {source}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ModuleError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            ModuleErrorImpl::LoadFailed { source, .. } => Some(source),
-            ModuleErrorImpl::Unavailable { source } => Some(source),
-            ModuleErrorImpl::InvalidName { .. } | ModuleErrorImpl::NotFound { .. } => None,
-        }
-    }
-}
-
 /// One typed symbol-target conversion error.
 #[derive(Debug)]
 pub struct SymbolError {
@@ -444,24 +371,6 @@ impl SymbolError {
             imp: SymbolErrorImpl::InvalidName {
                 input: InvalidName::from_nul_error(source),
             },
-        }
-    }
-}
-
-impl fmt::Display for SymbolError {
-    /// Formats one symbol-target conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            SymbolErrorImpl::InvalidName { input } => write_invalid_name(f, "symbol", input),
-        }
-    }
-}
-
-impl Error for SymbolError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            SymbolErrorImpl::InvalidName { .. } => None,
         }
     }
 }
@@ -503,61 +412,6 @@ impl FunctionError {
     pub(crate) fn function_not_found(module: Option<Module>, symbol: Symbol) -> Self {
         Self {
             imp: FunctionErrorImpl::Resolve { module, symbol },
-        }
-    }
-}
-
-impl fmt::Display for FunctionError {
-    /// Formats one function-target conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            FunctionErrorImpl::Module(error) => error.fmt(f),
-            FunctionErrorImpl::Symbol(error) => error.fmt(f),
-            FunctionErrorImpl::Resolve {
-                module: Some(module),
-                symbol,
-            } => write!(
-                f,
-                "function '{}' was not found in module '{}'",
-                symbol, module
-            ),
-            FunctionErrorImpl::Resolve {
-                module: None,
-                symbol,
-            } => write!(
-                f,
-                "function '{}' was not found in the process-global symbol space",
-                symbol
-            ),
-        }
-    }
-}
-
-impl Error for FunctionError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            FunctionErrorImpl::Module(error) => Some(error as &(dyn Error + 'static)),
-            FunctionErrorImpl::Symbol(error) => Some(error as &(dyn Error + 'static)),
-            FunctionErrorImpl::Resolve { .. } => None,
-        }
-    }
-}
-
-impl From<ModuleError> for FunctionError {
-    /// Maps one module-target conversion error into one function-target error.
-    fn from(error: ModuleError) -> Self {
-        Self {
-            imp: FunctionErrorImpl::Module(error),
-        }
-    }
-}
-
-impl From<SymbolError> for FunctionError {
-    /// Maps one symbol-target conversion error into one function-target error.
-    fn from(error: SymbolError) -> Self {
-        Self {
-            imp: FunctionErrorImpl::Symbol(error),
         }
     }
 }
@@ -617,11 +471,195 @@ pub fn into_symbol<T: IntoSymbol>(value: T) -> Result<Symbol, SymbolError> {
 /// Builds one [`Function`] from one already resolved address.
 fn function_from_address(resolved: NonNull<c_void>) -> Result<Function, FunctionError> {
     let resolved = resolve_function_address(resolved).map_err(ModuleError::module_unavailable)?;
-    Ok(Function::from_resolved_parts(
-        resolved.symbol,
-        Module::from_resolved_parts(resolved.module, resolved.module_name),
-        Symbol::from_cstring(resolved.symbol_name),
-    ))
+    Ok(unsafe {
+        Function::from_resolved_parts(
+            resolved.symbol,
+            Module::from_resolved_parts(resolved.module, resolved.module_name),
+            Symbol::from_cstring(resolved.symbol_name),
+        )
+    })
+}
+
+/// Standard-library trait impls used by the public target and error models.
+mod std_impls {
+    use super::*;
+    use std::error::Error;
+    use std::fmt;
+    use std::hash::{Hash, Hasher};
+
+    impl fmt::Display for Function {
+        /// Formats one resolved function target for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "'{}' in module '{}'", self.symbol, self.module)
+        }
+    }
+
+    impl PartialEq for Function {
+        fn eq(&self, other: &Self) -> bool {
+            self.resolved == other.resolved
+        }
+    }
+
+    impl Eq for Function {}
+
+    impl Hash for Function {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.resolved.hash(state);
+        }
+    }
+
+    impl PartialEq for Module {
+        fn eq(&self, other: &Self) -> bool {
+            self.resolved == other.resolved
+        }
+    }
+
+    impl Eq for Module {}
+
+    impl Hash for Module {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.resolved.hash(state);
+        }
+    }
+
+    impl fmt::Display for FunctionReplaceError {
+        /// Formats one function-replacement error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "failed to replace function {}: {}",
+                self.target, self.source
+            )
+        }
+    }
+
+    impl Error for FunctionReplaceError {
+        /// Returns the underlying source error.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    impl fmt::Display for Module {
+        /// Formats one resolved module name for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.name())
+        }
+    }
+
+    impl fmt::Display for Symbol {
+        /// Formats one symbol identity for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.name())
+        }
+    }
+
+    impl fmt::Display for ModuleError {
+        /// Formats one module-target conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                ModuleErrorImpl::InvalidName { input } => write_invalid_name(f, "module", input),
+                ModuleErrorImpl::NotFound { name } => write!(
+                    f,
+                    "module '{}' is not loaded in the current process",
+                    expect_utf8(name)
+                ),
+                ModuleErrorImpl::LoadFailed { name, source } => {
+                    write!(f, "failed to load module '{}': {source}", expect_utf8(name))
+                }
+                ModuleErrorImpl::Unavailable { source } => {
+                    write!(
+                        f,
+                        "failed to recover module information from the provided value: {source}"
+                    )
+                }
+            }
+        }
+    }
+
+    impl Error for ModuleError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                ModuleErrorImpl::LoadFailed { source, .. } => Some(source),
+                ModuleErrorImpl::Unavailable { source } => Some(source),
+                ModuleErrorImpl::InvalidName { .. } | ModuleErrorImpl::NotFound { .. } => None,
+            }
+        }
+    }
+
+    impl fmt::Display for SymbolError {
+        /// Formats one symbol-target conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                SymbolErrorImpl::InvalidName { input } => write_invalid_name(f, "symbol", input),
+            }
+        }
+    }
+
+    impl Error for SymbolError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                SymbolErrorImpl::InvalidName { .. } => None,
+            }
+        }
+    }
+
+    impl fmt::Display for FunctionError {
+        /// Formats one function-target conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                FunctionErrorImpl::Module(error) => error.fmt(f),
+                FunctionErrorImpl::Symbol(error) => error.fmt(f),
+                FunctionErrorImpl::Resolve {
+                    module: Some(module),
+                    symbol,
+                } => write!(
+                    f,
+                    "function '{}' was not found in module '{}'",
+                    symbol, module
+                ),
+                FunctionErrorImpl::Resolve {
+                    module: None,
+                    symbol,
+                } => write!(
+                    f,
+                    "function '{}' was not found in the process-global symbol space",
+                    symbol
+                ),
+            }
+        }
+    }
+
+    impl Error for FunctionError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                FunctionErrorImpl::Module(error) => Some(error as &(dyn Error + 'static)),
+                FunctionErrorImpl::Symbol(error) => Some(error as &(dyn Error + 'static)),
+                FunctionErrorImpl::Resolve { .. } => None,
+            }
+        }
+    }
+
+    impl From<ModuleError> for FunctionError {
+        /// Maps one module-target conversion error into one function-target error.
+        fn from(error: ModuleError) -> Self {
+            Self {
+                imp: FunctionErrorImpl::Module(error),
+            }
+        }
+    }
+
+    impl From<SymbolError> for FunctionError {
+        /// Maps one symbol-target conversion error into one function-target error.
+        fn from(error: SymbolError) -> Self {
+            Self {
+                imp: FunctionErrorImpl::Symbol(error),
+            }
+        }
+    }
 }
 
 /// Conversion trait impls for high-level function targets.
@@ -756,7 +794,7 @@ mod impls {
                 return Err(ModuleError::module_not_found(self));
             };
             let name = module_name_from_handle(resolved).unwrap_or(self);
-            Ok(Module::from_resolved_parts(resolved, name))
+            Ok(unsafe { Module::from_resolved_parts(resolved, name) })
         }
     }
 
@@ -764,7 +802,7 @@ mod impls {
         /// Wraps one already resolved module handle after recovering one diagnostic name.
         fn into_module(self) -> Result<Module, ModuleError> {
             let name = module_name_from_handle(self).map_err(ModuleError::module_unavailable)?;
-            Ok(Module::from_resolved_parts(self, name))
+            Ok(unsafe { Module::from_resolved_parts(self, name) })
         }
     }
 
@@ -810,8 +848,11 @@ mod impls {
 
 #[cfg(test)]
 mod tests {
-    use super::{into_function, into_module, into_symbol};
+    use super::{Function, Module, Symbol, into_function, into_module, into_symbol};
+    use std::collections::HashSet;
+    use std::ffi::CString;
     use std::ffi::c_void;
+    use std::ptr::NonNull;
 
     #[cfg(target_os = "windows")]
     type TestFunction = unsafe extern "system" fn() -> u32;
@@ -819,48 +860,68 @@ mod tests {
     #[cfg(target_os = "macos")]
     type TestFunction = unsafe extern "C" fn() -> i32;
 
-    #[cfg(target_os = "windows")]
     fn test_module_name() -> &'static str {
-        "kernel32.dll"
+        if cfg!(target_os = "macos") {
+            "/usr/lib/libSystem.B.dylib"
+        } else {
+            "kernel32.dll"
+        }
     }
 
-    #[cfg(target_os = "macos")]
-    fn test_module_name() -> &'static str {
-        "/usr/lib/libSystem.B.dylib"
-    }
-
-    #[cfg(target_os = "windows")]
     fn test_symbol_name() -> &'static str {
-        "GetCurrentProcessId"
+        if cfg!(target_os = "macos") {
+            "getpid"
+        } else {
+            "GetCurrentProcessId"
+        }
     }
 
-    #[cfg(target_os = "macos")]
-    fn test_symbol_name() -> &'static str {
-        "getpid"
-    }
-
-    #[cfg(target_os = "windows")]
     fn assert_raw_pointer_symbol_name(name: &str, raw: std::ptr::NonNull<c_void>) {
         let _ = raw;
-        assert_eq!(name, test_symbol_name());
+        assert_ne!(name, format!("0x{:x}", raw.as_ptr() as usize));
     }
 
-    #[cfg(target_os = "macos")]
-    fn assert_raw_pointer_symbol_name(name: &str, raw: std::ptr::NonNull<c_void>) {
-        assert!(!name.is_empty());
-        assert_ne!(name, format!("0x{:x}", raw.as_ptr() as usize));
+    fn assert_module_name_equivalent(actual: &str, expected: &str) {
+        if cfg!(target_os = "windows") {
+            assert!(actual.eq_ignore_ascii_case(expected));
+        } else {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn fake_ptr(value: usize) -> NonNull<c_void> {
+        NonNull::new(value as *mut c_void).expect("non-null test pointer")
     }
 
     #[test]
     fn resolves_modules_from_strings() {
         let module = into_module(test_module_name()).expect("valid module");
-        assert_eq!(module.name(), test_module_name());
+        assert_module_name_equivalent(module.name(), test_module_name());
     }
 
     #[test]
     fn preserves_existing_modules() {
         let module = into_module(test_module_name()).expect("valid module");
         assert_eq!(into_module(module.clone()).expect("valid module"), module);
+    }
+
+    #[test]
+    fn module_equality_ignores_diagnostic_names() {
+        let first = unsafe {
+            Module::from_resolved_parts(
+                fake_ptr(0x1111),
+                CString::new("first.dll").expect("valid c string"),
+            )
+        };
+        let second = unsafe {
+            Module::from_resolved_parts(
+                fake_ptr(0x1111),
+                CString::new("second.dll").expect("valid c string"),
+            )
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(HashSet::from([first, second]).len(), 1);
     }
 
     #[test]
@@ -893,14 +954,14 @@ mod tests {
 
         assert_eq!(function.module(), &module);
         assert_eq!(function.symbol().name(), test_symbol_name());
-        assert_eq!(module.to_string(), test_module_name());
-        assert_eq!(
-            function.to_string(),
-            format!(
+        assert_module_name_equivalent(&module.to_string(), test_module_name());
+        assert_module_name_equivalent(
+            &function.to_string(),
+            &format!(
                 "'{}' in module '{}'",
                 test_symbol_name(),
                 test_module_name()
-            )
+            ),
         );
     }
 
@@ -949,6 +1010,33 @@ mod tests {
             into_function(function.clone()).expect("valid function"),
             function
         );
+    }
+
+    #[test]
+    fn function_equality_ignores_diagnostic_labels() {
+        let first = unsafe {
+            Function::from_resolved_parts(
+                fake_ptr(0x1111),
+                Module::from_resolved_parts(
+                    fake_ptr(0x2222),
+                    CString::new("first.dll").expect("valid c string"),
+                ),
+                Symbol::from_cstring(CString::new("FirstName").expect("valid c string")),
+            )
+        };
+        let second = unsafe {
+            Function::from_resolved_parts(
+                fake_ptr(0x1111),
+                Module::from_resolved_parts(
+                    fake_ptr(0x3333),
+                    CString::new("second.dll").expect("valid c string"),
+                ),
+                Symbol::from_cstring(CString::new("SecondName").expect("valid c string")),
+            )
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(HashSet::from([first, second]).len(), 1);
     }
 
     #[test]

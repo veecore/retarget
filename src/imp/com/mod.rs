@@ -10,6 +10,11 @@ use std::ptr::NonNull;
 use windows_core::Interface;
 
 /// Returns the raw vtable slot address for one interface pointer and slot index.
+///
+/// # Safety
+///
+/// `interface_ptr` must point to a live COM interface whose vtable is valid for
+/// reads at `slot_index`.
 #[cfg(target_os = "windows")]
 pub unsafe fn vtable_slot(
     interface_ptr: NonNull<c_void>,
@@ -24,6 +29,12 @@ pub unsafe fn vtable_slot(
 }
 
 /// Returns one typed method pointer from one COM interface vtable slot.
+///
+/// # Safety
+///
+/// `interface_ptr` must point to a live COM interface whose vtable is valid for
+/// reads at `slot_index`, and `T` must exactly match the ABI and signature of
+/// that slot.
 #[cfg(target_os = "windows")]
 pub unsafe fn vtable_method<T: Copy>(
     interface_ptr: NonNull<c_void>,
@@ -34,6 +45,11 @@ pub unsafe fn vtable_method<T: Copy>(
 }
 
 /// Returns one typed method pointer by projecting one Windows interface vtable field.
+///
+/// # Safety
+///
+/// `interface_ptr` must point to a live COM interface of type `TInterface`, and
+/// `project` must read only a valid method field from that interface's vtable.
 #[cfg(target_os = "windows")]
 pub unsafe fn interface_method<TInterface, TMethod>(
     interface_ptr: NonNull<c_void>,
@@ -49,6 +65,11 @@ where
 }
 
 /// Reads one interface pointer written to one out-parameter.
+///
+/// # Safety
+///
+/// `out` must be either null or point to readable storage containing one COM
+/// interface pointer written by foreign code.
 #[cfg(target_os = "windows")]
 pub unsafe fn out_ptr_value(out: *mut *mut c_void) -> Option<NonNull<c_void>> {
     let value = unsafe { out.as_ref().copied()? };

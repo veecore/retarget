@@ -10,7 +10,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 
 /// Matches the Windows `BOOL` ABI used by the imported Detours callbacks.
-type BOOL = i32;
+type BoolAbi = i32;
 
 #[link(name = "detours_support", kind = "static")]
 unsafe extern "system" {
@@ -25,8 +25,13 @@ unsafe extern "system" {
     fn DetourEnumerateExports(
         module: HMODULE,
         context: *mut c_void,
-        callback: unsafe extern "system" fn(*mut c_void, u32, *const c_char, *mut c_void) -> BOOL,
-    ) -> BOOL;
+        callback: unsafe extern "system" fn(
+            *mut c_void,
+            u32,
+            *const c_char,
+            *mut c_void,
+        ) -> BoolAbi,
+    ) -> BoolAbi;
 }
 
 /// One export-name search running against one specific module.
@@ -160,7 +165,7 @@ unsafe extern "system" fn record_export_name(
     _ordinal: u32,
     symbol_name: *const c_char,
     symbol_address: *mut c_void,
-) -> BOOL {
+) -> BoolAbi {
     let Some(search) = (unsafe { context.cast::<ExportNameSearch>().as_mut() }) else {
         return 1;
     };

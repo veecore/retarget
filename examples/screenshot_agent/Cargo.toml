@@ -1,0 +1,47 @@
+[package]
+name = "retarget-screenshot-agent"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+inject = ["dep:hook-inject"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "inject"
+path = "src/bin/inject.rs"
+required-features = ["inject"]
+
+[[bin]]
+name = "screenshot_demo"
+path = "src/bin/screenshot_demo.rs"
+required-features = ["inject"]
+
+[[bin]]
+name = "screenshot_victim"
+path = "src/bin/screenshot_victim.rs"
+
+[package.metadata.hook-inject]
+entrypoint = "hook_inject_entry"
+
+[dependencies]
+hook-inject = { version = "0.1.0", optional = true }
+linkme = "0.3"
+retarget = { path = "../.." }
+xcap = "0.9.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+] }

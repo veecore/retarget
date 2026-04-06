@@ -68,7 +68,7 @@ fn resolved_method(method: NonNull<c_void>) -> &'static Method {
 fn has_direct_method(class: &AnyClass, selector: Sel) -> bool {
     class
         .instance_methods()
-        .into_iter()
+        .iter()
         .any(|method| method.name() == selector)
 }
 

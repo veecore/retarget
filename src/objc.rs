@@ -6,10 +6,8 @@
 use crate::FunctionPointer;
 use crate::error::{InvalidName, expect_utf8, write_invalid_name};
 use crate::imp::objc::{replace_method, resolve_class, resolve_method};
-use std::error::Error;
 use std::ffi::c_void;
 use std::ffi::{CStr, CString, NulError};
-use std::fmt;
 use std::ptr::NonNull;
 
 /// One Objective-C method target prepared for installation.
@@ -17,7 +15,11 @@ use std::ptr::NonNull;
 /// This is the fully resolved Objective-C hook target: the class and selector
 /// have already been looked up in the runtime and tied to either the instance
 /// or class method namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing follow the public hook identity
+/// `(class, selector, kind)`. The currently resolved runtime method pointer
+/// does not participate.
+#[derive(Debug, Clone)]
 pub struct ObjcMethod {
     /// Resolved runtime method pointer.
     resolved: NonNull<c_void>,
@@ -104,13 +106,6 @@ impl ObjcMethod {
     }
 }
 
-impl fmt::Display for ObjcMethod {
-    /// Formats one Objective-C method target for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}::{}", self.class, self.selector)
-    }
-}
-
 /// Describes whether one Objective-C hook targets one instance or class method.
 ///
 /// Objective-C keeps instance methods and class methods in different method
@@ -124,16 +119,6 @@ pub enum ObjcMethodKind {
     Class,
 }
 
-impl fmt::Display for ObjcMethodKind {
-    /// Formats one Objective-C method kind for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ObjcMethodKind::Instance => f.write_str("instance"),
-            ObjcMethodKind::Class => f.write_str("class"),
-        }
-    }
-}
-
 /// One Objective-C class identifier.
 ///
 /// This value preserves the user-facing class identity and one resolved runtime
@@ -141,7 +126,10 @@ impl fmt::Display for ObjcMethodKind {
 ///
 /// Use [`ObjcClass::instance_method`] or [`ObjcClass::class_method`] to turn a
 /// class into one concrete hook target.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing use the resolved runtime class pointer only. The
+/// retained class name is diagnostic and does not participate.
+#[derive(Debug, Clone)]
 pub struct ObjcClass {
     /// Resolved runtime class pointer.
     resolved: NonNull<c_void>,
@@ -183,13 +171,6 @@ impl ObjcClass {
     }
 }
 
-impl fmt::Display for ObjcClass {
-    /// Formats one Objective-C class identity for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
 /// One Objective-C selector identifier.
 ///
 /// Selectors intentionally stay identity-like. The eventual hook target is the
@@ -209,13 +190,6 @@ impl ObjcSelector {
     /// Returns this Objective-C selector name as a C string.
     pub(crate) fn name_c_str(&self) -> &CStr {
         &self.0
-    }
-}
-
-impl fmt::Display for ObjcSelector {
-    /// Formats one Objective-C selector identity for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 
@@ -264,31 +238,6 @@ impl ObjcClassError {
     }
 }
 
-impl fmt::Display for ObjcClassError {
-    /// Formats one Objective-C class conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            ObjcClassErrorImpl::InvalidName { input } => {
-                write_invalid_name(f, "Objective-C class", input)
-            }
-            ObjcClassErrorImpl::NotFound { name } => write!(
-                f,
-                "Objective-C class '{}' was not found in the runtime",
-                expect_utf8(name)
-            ),
-        }
-    }
-}
-
-impl Error for ObjcClassError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            ObjcClassErrorImpl::InvalidName { .. } | ObjcClassErrorImpl::NotFound { .. } => None,
-        }
-    }
-}
-
 /// One typed Objective-C selector conversion failure.
 #[derive(Debug)]
 pub struct ObjcSelectorError {
@@ -313,26 +262,6 @@ impl ObjcSelectorError {
             imp: ObjcSelectorErrorImpl::InvalidName {
                 input: InvalidName::from_nul_error(source),
             },
-        }
-    }
-}
-
-impl fmt::Display for ObjcSelectorError {
-    /// Formats one Objective-C selector conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            ObjcSelectorErrorImpl::InvalidName { input } => {
-                write_invalid_name(f, "Objective-C selector", input)
-            }
-        }
-    }
-}
-
-impl Error for ObjcSelectorError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            ObjcSelectorErrorImpl::InvalidName { .. } => None,
         }
     }
 }
@@ -380,54 +309,6 @@ impl ObjcMethodError {
                 selector,
                 kind,
             },
-        }
-    }
-}
-
-impl fmt::Display for ObjcMethodError {
-    /// Formats one Objective-C method conversion error for diagnostics.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.imp {
-            ObjcMethodErrorImpl::Class(error) => error.fmt(f),
-            ObjcMethodErrorImpl::Selector(error) => error.fmt(f),
-            ObjcMethodErrorImpl::Resolve {
-                class,
-                selector,
-                kind,
-            } => write!(
-                f,
-                "Objective-C {} method '{}' was not found on class '{}'",
-                kind, selector, class
-            ),
-        }
-    }
-}
-
-impl Error for ObjcMethodError {
-    /// Returns the underlying source error when one exists.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.imp {
-            ObjcMethodErrorImpl::Class(error) => Some(error),
-            ObjcMethodErrorImpl::Selector(error) => Some(error),
-            ObjcMethodErrorImpl::Resolve { .. } => None,
-        }
-    }
-}
-
-impl From<ObjcClassError> for ObjcMethodError {
-    /// Maps one class conversion failure into one method conversion failure.
-    fn from(error: ObjcClassError) -> Self {
-        Self {
-            imp: ObjcMethodErrorImpl::Class(error),
-        }
-    }
-}
-
-impl From<ObjcSelectorError> for ObjcMethodError {
-    /// Maps one selector conversion failure into one method conversion failure.
-    fn from(error: ObjcSelectorError) -> Self {
-        Self {
-            imp: ObjcMethodErrorImpl::Selector(error),
         }
     }
 }
@@ -480,6 +361,171 @@ pub fn into_objc_selector<T: IntoObjcSelector>(
     value: T,
 ) -> Result<ObjcSelector, ObjcSelectorError> {
     value.into_objc_selector()
+}
+
+/// Standard-library trait impls used by the public Objective-C target and
+/// error models.
+mod std_impls {
+    use super::*;
+    use std::error::Error;
+    use std::fmt;
+    use std::hash::{Hash, Hasher};
+
+    impl fmt::Display for ObjcMethod {
+        /// Formats one Objective-C method target for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}::{}", self.class, self.selector)
+        }
+    }
+
+    impl PartialEq for ObjcMethod {
+        fn eq(&self, other: &Self) -> bool {
+            self.class == other.class && self.selector == other.selector && self.kind == other.kind
+        }
+    }
+
+    impl Eq for ObjcMethod {}
+
+    impl Hash for ObjcMethod {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.class.hash(state);
+            self.selector.hash(state);
+            self.kind.hash(state);
+        }
+    }
+
+    impl fmt::Display for ObjcMethodKind {
+        /// Formats one Objective-C method kind for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                ObjcMethodKind::Instance => f.write_str("instance"),
+                ObjcMethodKind::Class => f.write_str("class"),
+            }
+        }
+    }
+
+    impl PartialEq for ObjcClass {
+        fn eq(&self, other: &Self) -> bool {
+            self.resolved == other.resolved
+        }
+    }
+
+    impl Eq for ObjcClass {}
+
+    impl Hash for ObjcClass {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.resolved.hash(state);
+        }
+    }
+
+    impl fmt::Display for ObjcClass {
+        /// Formats one Objective-C class identity for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.name())
+        }
+    }
+
+    impl fmt::Display for ObjcSelector {
+        /// Formats one Objective-C selector identity for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.name())
+        }
+    }
+
+    impl fmt::Display for ObjcClassError {
+        /// Formats one Objective-C class conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                ObjcClassErrorImpl::InvalidName { input } => {
+                    write_invalid_name(f, "Objective-C class", input)
+                }
+                ObjcClassErrorImpl::NotFound { name } => write!(
+                    f,
+                    "Objective-C class '{}' was not found in the runtime",
+                    expect_utf8(name)
+                ),
+            }
+        }
+    }
+
+    impl Error for ObjcClassError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                ObjcClassErrorImpl::InvalidName { .. } | ObjcClassErrorImpl::NotFound { .. } => {
+                    None
+                }
+            }
+        }
+    }
+
+    impl fmt::Display for ObjcSelectorError {
+        /// Formats one Objective-C selector conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                ObjcSelectorErrorImpl::InvalidName { input } => {
+                    write_invalid_name(f, "Objective-C selector", input)
+                }
+            }
+        }
+    }
+
+    impl Error for ObjcSelectorError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                ObjcSelectorErrorImpl::InvalidName { .. } => None,
+            }
+        }
+    }
+
+    impl fmt::Display for ObjcMethodError {
+        /// Formats one Objective-C method conversion error for diagnostics.
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.imp {
+                ObjcMethodErrorImpl::Class(error) => error.fmt(f),
+                ObjcMethodErrorImpl::Selector(error) => error.fmt(f),
+                ObjcMethodErrorImpl::Resolve {
+                    class,
+                    selector,
+                    kind,
+                } => write!(
+                    f,
+                    "Objective-C {} method '{}' was not found on class '{}'",
+                    kind, selector, class
+                ),
+            }
+        }
+    }
+
+    impl Error for ObjcMethodError {
+        /// Returns the underlying source error when one exists.
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match &self.imp {
+                ObjcMethodErrorImpl::Class(error) => Some(error),
+                ObjcMethodErrorImpl::Selector(error) => Some(error),
+                ObjcMethodErrorImpl::Resolve { .. } => None,
+            }
+        }
+    }
+
+    impl From<ObjcClassError> for ObjcMethodError {
+        /// Maps one class conversion failure into one method conversion failure.
+        fn from(error: ObjcClassError) -> Self {
+            Self {
+                imp: ObjcMethodErrorImpl::Class(error),
+            }
+        }
+    }
+
+    impl From<ObjcSelectorError> for ObjcMethodError {
+        /// Maps one selector conversion failure into one method conversion failure.
+        fn from(error: ObjcSelectorError) -> Self {
+            Self {
+                imp: ObjcMethodErrorImpl::Selector(error),
+            }
+        }
+    }
 }
 
 /// Conversion trait impls for high-level Objective-C targets.
@@ -601,15 +647,38 @@ mod impls {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObjcMethod, ObjcMethodKind, into_objc_class, into_objc_method, into_objc_selector,
+        ObjcClass, ObjcMethod, ObjcMethodKind, ObjcSelector, into_objc_class, into_objc_method,
+        into_objc_selector,
     };
     use crate::function::into_symbol;
+    use std::collections::HashSet;
+    use std::ffi::{CString, c_void};
+    use std::ptr::NonNull;
+
+    fn fake_ptr(value: usize) -> NonNull<c_void> {
+        NonNull::new(value as *mut c_void).expect("non-null test pointer")
+    }
 
     #[test]
     fn resolves_classes_from_strings() {
         let class = into_objc_class("NSObject").expect("valid class");
         assert_eq!(class.name(), "NSObject");
         assert_eq!(class.to_string(), "NSObject");
+    }
+
+    #[test]
+    fn classes_compare_by_runtime_pointer() {
+        let first = ObjcClass {
+            resolved: fake_ptr(0x1111),
+            name: CString::new("FirstName").expect("valid c string"),
+        };
+        let second = ObjcClass {
+            resolved: fake_ptr(0x1111),
+            name: CString::new("SecondName").expect("valid c string"),
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(HashSet::from([first, second]).len(), 1);
     }
 
     #[test]
@@ -693,6 +762,30 @@ mod tests {
 
         assert!(method.is_instance());
         assert_eq!(method.to_string(), "NSObject::description");
+    }
+
+    #[test]
+    fn methods_compare_by_public_identity() {
+        let class = ObjcClass {
+            resolved: fake_ptr(0x1111),
+            name: CString::new("NSObject").expect("valid c string"),
+        };
+        let selector = ObjcSelector(CString::new("description").expect("valid c string"));
+        let first = ObjcMethod {
+            resolved: fake_ptr(0x2222),
+            class: class.clone(),
+            selector: selector.clone(),
+            kind: ObjcMethodKind::Instance,
+        };
+        let second = ObjcMethod {
+            resolved: fake_ptr(0x3333),
+            class,
+            selector,
+            kind: ObjcMethodKind::Instance,
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(HashSet::from([first, second]).len(), 1);
     }
 
     #[test]

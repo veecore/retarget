@@ -1,8 +1,8 @@
 [package]
 name = "retarget"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "Work-in-progress cross-platform function, Objective-C, and COM hooking for macOS and Windows."
+description = "Straightforward cross-platform function, Objective-C, and COM hooks for macOS and Windows."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/veecore/retarget"

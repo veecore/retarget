@@ -1,73 +1,61 @@
+use std::fs::File;
+use std::io::ErrorKind;
+
 use retarget::{hook, install_registered_hooks, intercept::Signal};
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DemoIntercept {
-    ProcessId,
+    FileOpen,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ObservedIntercept {
-    signal: Signal<DemoIntercept>,
-}
-
-fn events() -> &'static Mutex<Vec<ObservedIntercept>> {
-    static EVENTS: OnceLock<Mutex<Vec<ObservedIntercept>>> = OnceLock::new();
-    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn take_events() -> Vec<ObservedIntercept> {
-    std::mem::take(&mut *events().lock().expect("event buffer should stay available"))
-}
-
-#[hook::observer(default = retarget::intercept::FirstHit)]
+#[hook::observer(default = retarget::intercept::EveryHit)]
 fn on_interception(signal: Signal<DemoIntercept>) {
-    events()
-        .lock()
-        .expect("event buffer should stay available")
-        .push(ObservedIntercept { signal });
+    println!(
+        "observed {:?} via {} at {:?}",
+        signal.value, signal.event.hook_id, signal.event.at
+    );
 }
 
 #[cfg(target_os = "macos")]
-#[hook::observe(
-    DemoIntercept::ProcessId,
-    mode = retarget::intercept::EveryHit
-)]
+#[hook::observe(DemoIntercept::FileOpen)]
 #[hook::c]
-unsafe extern "C" fn getpid() -> libc::pid_t {
-    forward!()
+unsafe extern "C" fn open(
+    _path: *const libc::c_char,
+    _flags: libc::c_int,
+    _mode: libc::mode_t,
+) -> libc::c_int {
+    unsafe {
+        *libc::__error() = libc::ENOENT;
+    }
+    -1
 }
 
 #[cfg(target_os = "windows")]
-#[hook::observe(
-    DemoIntercept::ProcessId,
-    mode = retarget::intercept::EveryHit
-)]
-#[hook::c(("kernel32.dll", "GetCurrentProcessId"))]
-unsafe extern "system" fn hooked_get_current_process_id() -> u32 {
-    forward!()
+#[hook::observe(DemoIntercept::FileOpen)]
+#[hook::c(("kernel32.dll", "CreateFileW"))]
+unsafe extern "system" fn create_file_w(
+    _path: *const u16,
+    _access: u32,
+    _share: u32,
+    _security: *const std::ffi::c_void,
+    _creation: u32,
+    _flags: u32,
+    _template: *mut std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    unsafe {
+        windows_sys::Win32::Foundation::SetLastError(
+            windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND,
+        );
+    }
+    windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
 }
 
 fn main() -> std::io::Result<()> {
     install_registered_hooks()?;
 
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let _ = libc::getpid();
-        let _ = libc::getpid();
-    }
-
-    #[cfg(target_os = "windows")]
-    unsafe {
-        let _ = windows_sys::Win32::System::Threading::GetCurrentProcessId();
-        let _ = windows_sys::Win32::System::Threading::GetCurrentProcessId();
-    }
-
-    for observed in take_events() {
-        println!(
-            "observed {:?} via {} at {:?}",
-            observed.signal.value, observed.signal.event.hook_id, observed.signal.event.at
-        );
+    for path in ["Cargo.toml", "Cargo.lock"] {
+        let error = File::open(path).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     Ok(())

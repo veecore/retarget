@@ -60,9 +60,7 @@ pub fn test_dylib_path() -> &'static str {
 
     #[cfg(target_os = "windows")]
     {
-        option_env!("RETARGET_HOOK_TEST_TARGET_DLL").expect(
-            "Windows dynamic test target DLL path is only available on a Windows host build",
-        )
+        env!("RETARGET_HOOK_TEST_TARGET_DLL")
     }
 }
 
@@ -75,9 +73,7 @@ pub fn test_caller_dylib_path() -> &'static str {
 
     #[cfg(target_os = "windows")]
     {
-        option_env!("RETARGET_HOOK_TEST_CALLER_DLL").expect(
-            "Windows dynamic test caller DLL path is only available on a Windows host build",
-        )
+        env!("RETARGET_HOOK_TEST_CALLER_DLL")
     }
 }
 
